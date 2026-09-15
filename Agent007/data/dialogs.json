@@ -1,0 +1,26 @@
+{
+  "_comment": "Диалоги сгруппированы по id аккаунта из accounts.json. Тестовые данные шага 2.",
+  "dialogs": {
+    "acc-work": [
+      {"id": "dlg-w-anna", "title": "Анна Ковалёва", "kind": "contact", "unread": 2},
+      {"id": "dlg-w-pavel", "title": "Павел Дроздов", "kind": "contact", "unread": 0},
+      {"id": "dlg-w-devops", "title": "Инфраструктура и DevOps", "kind": "group", "unread": 14},
+      {"id": "dlg-w-release", "title": "Релизы Agent007", "kind": "group", "unread": 0},
+      {"id": "dlg-w-python", "title": "Python дайджест", "kind": "channel", "unread": 37},
+      {"id": "dlg-w-status", "title": "Статус сервисов", "kind": "channel", "unread": 1}
+    ],
+    "acc-personal": [
+      {"id": "dlg-p-mom", "title": "Мама", "kind": "contact", "unread": 1},
+      {"id": "dlg-p-sergey", "title": "Сергей Литвинов", "kind": "contact", "unread": 0},
+      {"id": "dlg-p-family", "title": "Семейный чат", "kind": "group", "unread": 5},
+      {"id": "dlg-p-garage", "title": "Гараж 4/2", "kind": "group", "unread": 0},
+      {"id": "dlg-p-news", "title": "Новости дня", "kind": "channel", "unread": 128}
+    ],
+    "acc-support": [
+      {"id": "dlg-s-ticket", "title": "Тикет #4821 — Иван Петров", "kind": "contact", "unread": 3},
+      {"id": "dlg-s-duty", "title": "Дежурная смена", "kind": "group", "unread": 8},
+      {"id": "dlg-s-alerts", "title": "Алерты мониторинга", "kind": "channel", "unread": 52}
+    ],
+    "acc-reserve": []
+  }
+}

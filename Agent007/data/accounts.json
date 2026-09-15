@@ -1,0 +1,29 @@
+{
+  "_comment": "Тестовые данные шага 2. Заменяются выборкой из MySQL на следующем шаге.",
+  "accounts": [
+    {
+      "id": "acc-work",
+      "name": "Рабочий аккаунт",
+      "phone": "+7 999 100-20-30",
+      "status": "online"
+    },
+    {
+      "id": "acc-personal",
+      "name": "Личный аккаунт",
+      "phone": "+7 999 214-77-01",
+      "status": "offline"
+    },
+    {
+      "id": "acc-support",
+      "name": "Поддержка Agent007",
+      "phone": "+7 999 555-19-84",
+      "status": "limited"
+    },
+    {
+      "id": "acc-reserve",
+      "name": "Резервный аккаунт",
+      "phone": "+7 999 300-45-12",
+      "status": "offline"
+    }
+  ]
+}

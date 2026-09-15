@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
     log_dir: Path = Path("Log")
+    data_dir: Path = Path("Agent007/data")
 
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
@@ -42,12 +43,22 @@ class Settings(BaseSettings):
     telegram_api_id: int = 0
     telegram_api_hash: SecretStr = SecretStr("")
 
+    @staticmethod
+    def _resolve(directory: Path) -> Path:
+        """Anchor a relative directory to the repository root; keep absolute ones as-is."""
+        return directory if directory.is_absolute() else PROJECT_ROOT / directory
+
     @computed_field
     @property
     def log_path(self) -> Path:
         """Absolute path of the log directory, resolved against the repository root."""
-        directory = self.log_dir
-        return directory if directory.is_absolute() else PROJECT_ROOT / directory
+        return self._resolve(self.log_dir)
+
+    @computed_field
+    @property
+    def data_path(self) -> Path:
+        """Absolute path of the directory with the JSON data files read by the UI."""
+        return self._resolve(self.data_dir)
 
     def database_url(self, *, is_async: bool = True) -> str:
         """Build the SQLAlchemy URL.
