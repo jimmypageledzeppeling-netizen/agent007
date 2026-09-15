@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+testpaths = ["Agent007/tests"]
+pythonpath = ["Agent007"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers"
+markers = [
+    "integration: requires MySQL/Kafka from docker-compose to be running",
+]

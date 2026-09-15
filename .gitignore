@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Virtual environment
+.venv/
+
+# Secrets and local config
+.env
+
+# Application logs (directory is kept, contents are not)
+Log/*
+!Log/.gitkeep
+
+# Telegram session files (contain account credentials)
+*.session
+*.session-journal
+
+# Visual Studio
+.vs/
+bin/
+obj/

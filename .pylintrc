@@ -1,0 +1,20 @@
+[MAIN]
+ignore=.git,.venv,.vs,__pycache__,Log
+init-hook=import sys; sys.path.insert(0, "Agent007")
+jobs=0
+
+[FORMAT]
+max-line-length=100
+
+[MESSAGES CONTROL]
+# Docstrings are required by Promt.md, so the missing-docstring checks stay enabled.
+disable=
+    too-few-public-methods,
+    duplicate-code
+
+[BASIC]
+good-names=i,j,k,ex,db,ui,id,_
+
+[DESIGN]
+max-args=8
+max-attributes=10

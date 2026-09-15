@@ -1,0 +1,11 @@
+# Development dependencies. Install: pip install -r requirements-dev.txt
+-r requirements.txt
+
+# Tests
+pytest==8.4.2
+pytest-asyncio==1.2.0
+pytest-cov==7.0.0
+
+# Static analysis (required by Promt.md)
+flake8==7.3.0
+pylint==3.3.9

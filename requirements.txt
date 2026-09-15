@@ -1,0 +1,21 @@
+# Runtime dependencies. Install: pip install -r requirements.txt
+# UI: tkinter ships with CPython (no package needed).
+
+# Telegram API (async client)
+telethon==1.41.2
+
+# MySQL: async driver for the app, sync driver for Alembic migrations
+SQLAlchemy[asyncio]==2.0.44
+aiomysql==0.2.0
+PyMySQL==1.1.2
+# Required by PyMySQL for MySQL 8's default caching_sha2_password authentication.
+cryptography==46.0.4
+alembic==1.16.5
+
+# Kafka (async producer/consumer)
+aiokafka==0.12.0
+
+# Configuration from environment / .env
+pydantic==2.12.3
+pydantic-settings==2.11.0
+python-dotenv==1.1.1
