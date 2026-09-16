@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_dir: Path = Path("Log")
     data_dir: Path = Path("Agent007/data")
+    sessions_dir: Path = Path("Agent007/sessions")
+    data_mode: str = "test"
 
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3306
@@ -60,6 +62,17 @@ class Settings(BaseSettings):
         """Absolute path of the directory with the JSON data files read by the UI."""
         return self._resolve(self.data_dir)
 
+    @computed_field
+    @property
+    def sessions_path(self) -> Path:
+        """Absolute path of directory with Telegram session files."""
+        return self._resolve(self.sessions_dir)
+
+    @property
+    def use_live_data(self) -> bool:
+        """Whether the application should use the (future) live data source."""
+        return self.data_mode.strip().lower() == "live"
+
     def database_url(self, *, is_async: bool = True) -> str:
         """Build the SQLAlchemy URL.
 
@@ -84,3 +97,29 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Return the process-wide settings instance (read from the environment once)."""
     return Settings()
+
+
+def save_telegram_credentials(api_id: int, api_hash: str, *, env_path: Path | None = None) -> None:
+    """Persist Telegram API credentials to .env and refresh cached settings."""
+    clean_hash = api_hash.strip()
+    if api_id <= 0:
+        raise ValueError("TELEGRAM_API_ID must be a positive integer")
+    if not clean_hash:
+        raise ValueError("TELEGRAM_API_HASH must not be empty")
+
+    target = env_path or (PROJECT_ROOT / ".env")
+    lines = target.read_text(encoding="utf-8").splitlines() if target.exists() else []
+
+    def _upsert(key: str, value: str) -> None:
+        prefix = f"{key}="
+        for index, line in enumerate(lines):
+            if line.strip().startswith(prefix):
+                lines[index] = f"{key}={value}"
+                return
+        lines.append(f"{key}={value}")
+
+    _upsert("TELEGRAM_API_ID", str(api_id))
+    _upsert("TELEGRAM_API_HASH", clean_hash)
+
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    get_settings.cache_clear()

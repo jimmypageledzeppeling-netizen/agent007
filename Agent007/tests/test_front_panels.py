@@ -8,6 +8,7 @@ covered, not just the rendering.
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import ttk
 
 from app.models import Account, AccountStatus, Dialog, DialogKind, Message
 from Front.accounts.accounts_panel import AccountsPanel
@@ -98,6 +99,51 @@ def test_accounts_panel_replaces_previous_contents(
     panel.set_accounts(fake_repository.accounts())
     panel.set_accounts(fake_repository.accounts()[:1])
     assert list(panel.tree.get_children()) == ["a-1"]
+
+
+def test_accounts_panel_context_menu_opens_add_account_modal(tk_root: tk.Tk) -> None:
+    """Right-click action opens a modal dialog with phone input controls."""
+    panel = AccountsPanel(tk_root)
+    panel._open_add_account_dialog()  # pylint: disable=protected-access
+    tk_root.update()
+
+    dialogs = [child for child in panel.winfo_children() if isinstance(child, tk.Toplevel)]
+    assert len(dialogs) == 1
+    dialog = dialogs[0]
+    assert dialog.title() == "Добавить аккаунт"
+
+    entries = [
+        widget
+        for widget in dialog.winfo_children()[0].winfo_children()
+        if isinstance(widget, ttk.Entry)
+    ]
+    assert len(entries) == 1
+
+    buttons = [
+        widget
+        for widget in dialog.winfo_children()[0].winfo_children()[2].winfo_children()
+        if isinstance(widget, ttk.Button)
+    ]
+    labels = [button.cget("text") for button in buttons]
+    assert labels == ["ОК", "ОТМЕНА"]
+
+
+def test_accounts_panel_modal_cancel_closes_dialog(tk_root: tk.Tk) -> None:
+    """Cancel button closes the add-account modal."""
+    panel = AccountsPanel(tk_root)
+    panel._open_add_account_dialog()  # pylint: disable=protected-access
+    tk_root.update()
+
+    dialog = next(child for child in panel.winfo_children() if isinstance(child, tk.Toplevel))
+    cancel_button = next(
+        widget
+        for widget in dialog.winfo_children()[0].winfo_children()[2].winfo_children()
+        if isinstance(widget, ttk.Button) and widget.cget("text") == "ОТМЕНА"
+    )
+    cancel_button.invoke()
+    tk_root.update()
+
+    assert not dialog.winfo_exists()
 
 
 # --- dialogs panel -----------------------------------------------------------

@@ -9,12 +9,15 @@ from pathlib import Path
 import pytest
 
 from app.config import Settings
-from app.models import DialogKind
+from app.models import Account, AccountStatus, DialogKind
 from app.repository import (
     ACCOUNTS_FILENAME,
     DIALOGS_FILENAME,
+    LIVE_ACCOUNTS_FILENAME,
     MESSAGES_FILENAME,
     JsonFileRepository,
+    LiveRepository,
+    create_repository,
 )
 
 
@@ -190,3 +193,68 @@ def test_data_dir_defaults_to_the_settings_value() -> None:
     """Only app.config decides where the data lives."""
     settings = Settings(_env_file=None)
     assert JsonFileRepository(settings=settings).data_dir == settings.data_path
+
+
+def test_factory_uses_json_repository_in_test_mode() -> None:
+    """DATA_MODE=test keeps reading the shipped JSON fixtures."""
+    repository = create_repository(settings=Settings(_env_file=None, data_mode="test"))
+    assert isinstance(repository, JsonFileRepository)
+
+
+def test_factory_uses_live_repository_in_live_mode() -> None:
+    """DATA_MODE=live switches to the Telegram-backed repository."""
+    repository = create_repository(settings=Settings(_env_file=None, data_mode="live"))
+    assert isinstance(repository, LiveRepository)
+
+
+def test_live_repository_reads_empty_when_accounts_file_is_missing(tmp_path: Path) -> None:
+    """Live mode starts empty before the first connected account is saved."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+    assert repository.accounts() == []
+    assert not (settings.data_path / ACCOUNTS_FILENAME).exists()
+
+
+def test_live_repository_adds_account_to_json_storage(tmp_path: Path) -> None:
+    """Successful add_account persists account metadata in accounts.json."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+
+    account = Account(id="tg-1", name="Имя · +7999", phone="+7999", status=AccountStatus.ONLINE)
+    repository._upsert_account(account)  # pylint: disable=protected-access
+    assert account.status is AccountStatus.ONLINE
+    assert repository.accounts()[0].id == "tg-1"
+    assert (settings.data_path / LIVE_ACCOUNTS_FILENAME).exists()
+
+
+def test_live_repository_removes_account_from_json_storage(tmp_path: Path) -> None:
+    """remove_account deletes persisted account record."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+    repository._upsert_account(
+        Account(id="tg-1", name="Имя · +7999", phone="+7999", status=AccountStatus.ONLINE)
+    )  # pylint: disable=protected-access
+
+    assert repository.remove_account("tg-1") is True
+    assert repository.accounts() == []

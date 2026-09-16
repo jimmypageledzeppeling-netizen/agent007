@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from app import __version__  # noqa: E402  pylint: disable=wrong-import-position
 from app.config import get_settings  # noqa: E402  pylint: disable=wrong-import-position
 from app.logging_config import setup_logging  # noqa: E402  pylint: disable=wrong-import-position
+from app.repository import create_repository  # noqa: E402  pylint: disable=wrong-import-position
 from Front.main_window import run  # noqa: E402  pylint: disable=wrong-import-position
 
 
@@ -56,9 +57,10 @@ def main() -> int:
     logger.info("Agent007 %s starting in %s mode", __version__, settings.app_env)
     logger.info("Logs are written to %s", log_dir)
     _configure_tk_environment()
+    repository = create_repository(settings=settings)
 
     try:
-        run()
+        run(repository)
     except tk.TclError:
         # No display, or Tk is missing from the interpreter: nothing to fall back on.
         logger.exception("Tkinter could not open the main window")

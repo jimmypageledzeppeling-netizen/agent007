@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app.config import PROJECT_ROOT, Settings, get_settings
+from app.config import PROJECT_ROOT, Settings, get_settings, save_telegram_credentials
 
 
 def test_database_url_uses_async_driver_by_default(settings: Settings) -> None:
@@ -56,3 +56,44 @@ def test_telegram_configured_requires_both_values() -> None:
 def test_get_settings_is_cached() -> None:
     """Configuration is read from the environment exactly once."""
     assert get_settings() is get_settings()
+
+
+def test_data_mode_defaults_to_test() -> None:
+    """Without DATA_MODE, the repository should stay on JSON fixtures."""
+    settings = Settings(_env_file=None)
+    assert settings.data_mode == "test"
+    assert settings.use_live_data is False
+
+
+def test_data_mode_live_enables_live_repository() -> None:
+    """DATA_MODE=live switches startup to the live repository stub."""
+    assert Settings(_env_file=None, data_mode="live").use_live_data is True
+
+
+def test_data_mode_is_case_and_whitespace_tolerant() -> None:
+    """Human-edited .env values should still parse as expected."""
+    assert Settings(_env_file=None, data_mode=" Live ").use_live_data is True
+
+
+def test_save_telegram_credentials_writes_values(tmp_path: Path) -> None:
+    """Credentials are persisted into .env for next launches."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("DATA_MODE=live\n", encoding="utf-8")
+
+    save_telegram_credentials(12345, "hash-value", env_path=env_path)
+    content = env_path.read_text(encoding="utf-8")
+
+    assert "TELEGRAM_API_ID=12345" in content
+    assert "TELEGRAM_API_HASH=hash-value" in content
+
+
+def test_save_telegram_credentials_updates_existing_keys(tmp_path: Path) -> None:
+    """Existing TELEGRAM keys are updated instead of duplicated."""
+    env_path = tmp_path / ".env"
+    env_path.write_text("TELEGRAM_API_ID=1\nTELEGRAM_API_HASH=old\n", encoding="utf-8")
+
+    save_telegram_credentials(99, "new-hash", env_path=env_path)
+    lines = env_path.read_text(encoding="utf-8").splitlines()
+
+    assert lines.count("TELEGRAM_API_ID=99") == 1
+    assert lines.count("TELEGRAM_API_HASH=new-hash") == 1
