@@ -158,6 +158,7 @@ class MainWindow:
             on_select=self._on_account_selected,
             on_add_account=self._on_add_account_requested,
             on_remove_account=self._on_remove_account_requested,
+            on_clear_account=self._on_clear_account_requested,
         )
         self.dialogs_panel = DialogsPanel(
             self.container, on_select=self._on_dialog_selected
@@ -284,6 +285,33 @@ class MainWindow:
 
         if removed:
             self.load_accounts()
+
+    def _on_clear_account_requested(self, account: Account) -> None:
+        """Ask confirmation and clear all chats for selected account."""
+        confirmed = messagebox.askyesno(
+            "Очистить чаты",
+            f"Очистить все чаты для {account.phone or account.name}?",
+            parent=self.master,
+        )
+        if not confirmed:
+            return
+
+        self._set_status("Очистка чатов...")
+        try:
+            cleared, failed = self._repository.clear_account_chats(account.id)
+        except RuntimeError as error:
+            self._set_status(str(error))
+            messagebox.showinfo("Режим данных", str(error))
+            return
+        except Exception:  # pragma: no cover - runtime dependency
+            _LOGGER.exception("Could not clear chats for account %s", account.id)
+            self._set_status("Не удалось очистить чаты")
+            messagebox.showerror("Очистить чаты", "Не удалось очистить чаты")
+            return
+
+        self.dialogs_panel.set_dialogs(self._repository.dialogs(account.id))
+        self.messages_panel.show_placeholder()
+        self._set_status(f"Чаты очищены: {cleared}, ошибок: {failed}")
 
     def _request_code(self, phone: str) -> str | None:
         """Prompt for Telegram SMS/app code in a modal dialog."""

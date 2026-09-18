@@ -19,6 +19,7 @@ _NO_SELECTION_TEXT = "Аккаунт не выбран"
 _ADD_ACCOUNT_TITLE = "Добавить аккаунт"
 _PHONE_LABEL = "Номер телефона"
 _REMOVE_ACCOUNT_LABEL = "Удалить номер"
+_CLEAR_CHATS_LABEL = "Очистить"
 _TAG_PLACEHOLDER = "placeholder"
 
 
@@ -64,12 +65,14 @@ class AccountsPanel(ttk.Labelframe):
         on_select: Callable[[Account], None] | None = None,
         on_add_account: Callable[[AddAccountRequest], None] | None = None,
         on_remove_account: Callable[[Account], None] | None = None,
+        on_clear_account: Callable[[Account], None] | None = None,
     ) -> None:
         """Build the list widget; call :meth:`set_accounts` to fill it."""
         super().__init__(master, text=TITLE, padding=theme.PANEL_PADDING)
         self._on_select = on_select
         self._on_add_account = on_add_account
         self._on_remove_account = on_remove_account
+        self._on_clear_account = on_clear_account
         self._accounts: dict[str, Account] = {}
         # Id already reported to the callback, used to swallow repeated events.
         self._notified: str | None = None
@@ -95,6 +98,7 @@ class AccountsPanel(ttk.Labelframe):
         self._menu = tk.Menu(self, tearoff=False)
         self._menu.add_command(label="Добавить аккаунт", command=self._open_add_account_dialog)
         self._menu.add_command(label=_REMOVE_ACCOUNT_LABEL, command=self._request_remove_selected)
+        self._menu.add_command(label=_CLEAR_CHATS_LABEL, command=self._request_clear_selected)
 
         scrollbar = ttk.Scrollbar(self, orient="vertical", command=self._tree.yview)
         scrollbar.grid(row=0, column=1, sticky="ns")
@@ -185,7 +189,9 @@ class AccountsPanel(ttk.Labelframe):
 
         selected = self.selected
         remove_state = "normal" if selected is not None else "disabled"
+        clear_state = "normal" if selected is not None else "disabled"
         self._menu.entryconfigure(_REMOVE_ACCOUNT_LABEL, state=remove_state)
+        self._menu.entryconfigure(_CLEAR_CHATS_LABEL, state=clear_state)
 
         self._menu.tk_popup(event.x_root, event.y_root)
         self._menu.grab_release()
@@ -256,3 +262,9 @@ class AccountsPanel(ttk.Labelframe):
         account = self.selected
         if account is not None and self._on_remove_account is not None:
             self._on_remove_account(account)
+
+    def _request_clear_selected(self) -> None:
+        """Request chat cleanup for the selected account through the callback."""
+        account = self.selected
+        if account is not None and self._on_clear_account is not None:
+            self._on_clear_account(account)

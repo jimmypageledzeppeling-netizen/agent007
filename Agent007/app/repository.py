@@ -14,12 +14,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
 from telethon import TelegramClient, errors, utils
+from telethon.tl.functions.messages import DeleteHistoryRequest
 from telethon.tl.types import Channel, Chat, User
 
 from app.config import Settings, get_settings
@@ -63,6 +65,10 @@ class DataRepository(Protocol):
 
     def remove_account(self, account_id: str) -> bool:
         """Remove an account from the data source."""
+        raise NotImplementedError
+
+    def clear_account_chats(self, account_id: str) -> tuple[int, int]:
+        """Clear all dialogs for one account and return (cleared, failed)."""
         raise NotImplementedError
 
 
@@ -117,6 +123,10 @@ class JsonFileRepository:
     def remove_account(self, account_id: str) -> bool:
         """Reject account removal outside live mode."""
         raise RuntimeError("Удаление аккаунта доступно только в DATA_MODE=live")
+
+    def clear_account_chats(self, account_id: str) -> tuple[int, int]:
+        """Reject chat cleanup outside live mode."""
+        raise RuntimeError("Очистка чатов доступна только в DATA_MODE=live")
 
     def _document(self, filename: str) -> dict[str, Any]:
         """Return a parsed file, reading it from disk on first use only."""
@@ -514,6 +524,54 @@ class LiveRepository:
         self._write_document(document)
         self._delete_session(account_id)
         return True
+
+    def clear_account_chats(self, account_id: str) -> tuple[int, int]:
+        """Clear all dialogs for account from Telegram dialog list."""
+        worker = self._get_worker(account_id)
+        if worker is None:
+            raise RuntimeError("Аккаунт не подключён")
+
+        async def _clear(client: TelegramClient) -> tuple[int, int]:
+            if not await client.is_user_authorized():
+                return (0, 0)
+
+            cleared = 0
+            failed = 0
+            async for item in client.iter_dialogs(limit=200):
+                peer = item.entity
+                try:
+                    if hasattr(client, "delete_dialog"):
+                        await client.delete_dialog(peer)
+                    else:
+                        await client(
+                            DeleteHistoryRequest(
+                                peer=peer,
+                                max_id=0,
+                                revoke=False,
+                                just_clear=True,
+                            )
+                        )
+                    cleared += 1
+                except Exception:  # pragma: no cover - runtime dependency
+                    _LOGGER.exception(
+                        "Could not clear dialog %s for account %s", item.id, account_id
+                    )
+                    failed += 1
+
+                await asyncio.sleep(
+                    random.uniform(
+                        self._settings.telegram_clear_delay_min_seconds,
+                        self._settings.telegram_clear_delay_max_seconds,
+                    )
+                )
+
+            return (cleared, failed)
+
+        try:
+            return worker.run_rpc(_clear, timeout=120.0)
+        except (errors.RPCError, OSError, RuntimeError, TimeoutError):
+            _LOGGER.exception("Could not clear dialogs for account %s", account_id)
+            raise RuntimeError("Не удалось очистить чаты аккаунта") from None
 
     def _document(self) -> dict[str, Any]:
         if not self._accounts_path.exists():

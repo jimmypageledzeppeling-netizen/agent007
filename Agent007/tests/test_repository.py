@@ -343,3 +343,65 @@ def test_live_repository_add_account_uses_worker_and_reports_status(
     assert statuses == ["Подключение к Telegram..."]
     assert events.index("join:phone-+7999") < events.index("rename:phone-+7999->tg-42")
     assert repository.accounts()[0].id == "tg-42"
+
+
+def test_live_repository_clears_all_account_chats(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """clear_account_chats deletes each dialog for the selected account worker."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+    repository._upsert_account(  # pylint: disable=protected-access
+        Account(id="tg-42", name="Tester · +7999", phone="+7999", status=AccountStatus.ONLINE)
+    )
+
+    class _DialogItem:
+        def __init__(self, dialog_id: int, entity: object) -> None:
+            self.id = dialog_id
+            self.entity = entity
+
+    class FakeWorker:
+        def __init__(self) -> None:
+            self.deleted: list[object] = []
+
+        def is_alive(self) -> bool:
+            return True
+
+        def run_rpc(self, operation: Callable[[object], object], timeout: float = 30.0) -> object:
+            class FakeClient:
+                async def is_user_authorized(self) -> bool:
+                    return True
+
+                async def iter_dialogs(self, limit: int = 200):
+                    yield _DialogItem(1, "peer-1")
+                    yield _DialogItem(2, "peer-2")
+
+                async def delete_dialog(self, peer: object) -> None:
+                    deleted.append(peer)
+
+            return __import__("asyncio").run(operation(FakeClient()))
+
+    sleeps: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(repository_module.asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(repository_module.random, "uniform", lambda a, b: 0.33)
+
+    deleted: list[object] = []
+    worker = FakeWorker()
+    repository._workers["tg-42"] = worker  # pylint: disable=protected-access
+
+    cleared, failed = repository.clear_account_chats("tg-42")
+
+    assert (cleared, failed) == (2, 0)
+    assert deleted == ["peer-1", "peer-2"]
+    assert sleeps == [0.33, 0.33]

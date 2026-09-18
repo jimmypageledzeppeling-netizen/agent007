@@ -146,6 +146,21 @@ def test_accounts_panel_modal_cancel_closes_dialog(tk_root: tk.Tk) -> None:
     assert not dialog.winfo_exists()
 
 
+def test_accounts_panel_clear_callback_receives_selected_account(
+    tk_root: tk.Tk, fake_repository: FakeRepository
+) -> None:
+    """Clear action forwards selected account to the main-window callback."""
+    seen: list[Account] = []
+    panel = AccountsPanel(tk_root, on_clear_account=seen.append)
+    panel.set_accounts(fake_repository.accounts())
+    panel.select("a-1")
+    tk_root.update()
+
+    panel._request_clear_selected()  # pylint: disable=protected-access
+
+    assert [account.id for account in seen] == ["a-1"]
+
+
 # --- dialogs panel -----------------------------------------------------------
 
 

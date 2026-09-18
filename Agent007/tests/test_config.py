@@ -97,3 +97,24 @@ def test_save_telegram_credentials_updates_existing_keys(tmp_path: Path) -> None
 
     assert lines.count("TELEGRAM_API_ID=99") == 1
     assert lines.count("TELEGRAM_API_HASH=new-hash") == 1
+
+
+def test_telegram_clear_delay_defaults_are_valid() -> None:
+    """Bulk clear delay defaults stay within accepted anti-spam range."""
+    settings = Settings(_env_file=None)
+    assert settings.telegram_clear_delay_min_seconds == 0.2
+    assert settings.telegram_clear_delay_max_seconds == 1.5
+
+
+def test_telegram_clear_delay_range_is_rejected_when_inverted() -> None:
+    """Max delay below min delay is a configuration error."""
+    try:
+        Settings(
+            _env_file=None,
+            telegram_clear_delay_min_seconds=1.0,
+            telegram_clear_delay_max_seconds=0.5,
+        )
+    except ValueError as error:
+        assert "TELEGRAM_CLEAR_DELAY_MAX_SECONDS" in str(error)
+    else:
+        raise AssertionError("Expected invalid delay range to raise ValueError")

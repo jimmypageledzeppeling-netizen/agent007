@@ -53,6 +53,7 @@ class FakeRepository:
         self._messages = messages or {}
         self.dialog_calls: list[str] = []
         self.message_calls: list[str] = []
+        self.clear_calls: list[str] = []
 
     def accounts(self) -> list[Account]:
         """Return the canned accounts."""
@@ -67,6 +68,16 @@ class FakeRepository:
         """Return the canned messages of ``dialog_id`` and record the call."""
         self.message_calls.append(dialog_id)
         return list(self._messages.get(dialog_id, []))
+
+    def clear_account_chats(self, account_id: str) -> tuple[int, int]:
+        """Record bulk-clear request and wipe canned dialogs/messages for account."""
+        self.clear_calls.append(account_id)
+        dialogs = self._dialogs.get(account_id, [])
+        cleared = len(dialogs)
+        for dialog in dialogs:
+            self._messages.pop(dialog.id, None)
+        self._dialogs[account_id] = []
+        return (cleared, 0)
 
 
 @pytest.fixture(name="tk_root")

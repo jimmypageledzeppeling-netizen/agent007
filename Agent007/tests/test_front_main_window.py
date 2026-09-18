@@ -150,3 +150,23 @@ def test_window_reloads_accounts_on_demand(
     window.master.update()
     assert list(window.accounts_panel.tree.get_children()) == ["a-1", "a-2"]
     assert fake_repository.dialog_calls == ["a-1", "a-1"]
+
+
+def test_clearing_account_chats_calls_repository_and_refreshes_dialogs(
+    window: MainWindow, fake_repository: FakeRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Clear action wipes dialogs via repository and refreshes the center/right panels."""
+    monkeypatch.setattr("Front.main_window.messagebox.askyesno", lambda *args, **kwargs: True)
+
+    account = window.accounts_panel.selected
+    assert account is not None
+    assert list(window.dialogs_panel.tree.get_children())
+
+    window._on_clear_account_requested(account)  # pylint: disable=protected-access
+    window.master.update()
+
+    assert fake_repository.clear_calls == ["a-1"]
+    rows = window.dialogs_panel.tree.get_children()
+    assert [window.dialogs_panel.tree.item(iid, "text") for iid in rows] == [
+        "У аккаунта нет диалогов"
+    ]

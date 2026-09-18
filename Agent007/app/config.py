@@ -9,7 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import SecretStr, computed_field
+from pydantic import Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Repository root: .../Agent007/Agent007/app/config.py -> up three levels.
@@ -44,6 +44,16 @@ class Settings(BaseSettings):
 
     telegram_api_id: int = 0
     telegram_api_hash: SecretStr = SecretStr("")
+    telegram_clear_delay_min_seconds: float = Field(default=0.2, ge=0.2, le=1.5)
+    telegram_clear_delay_max_seconds: float = Field(default=1.5, ge=0.2, le=1.5)
+
+    @model_validator(mode="after")
+    def _validate_clear_delay_range(self) -> "Settings":
+        if self.telegram_clear_delay_max_seconds < self.telegram_clear_delay_min_seconds:
+            raise ValueError(
+                "TELEGRAM_CLEAR_DELAY_MAX_SECONDS must be >= TELEGRAM_CLEAR_DELAY_MIN_SECONDS"
+            )
+        return self
 
     @staticmethod
     def _resolve(directory: Path) -> Path:
