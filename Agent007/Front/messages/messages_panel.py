@@ -7,7 +7,8 @@ right-aligned and coloured so the direction is readable at a glance.
 from __future__ import annotations
 
 import tkinter as tk
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from pathlib import Path
 from tkinter import ttk
 
 from app.models import Dialog, Message
@@ -24,6 +25,7 @@ _TAG_META_OUTGOING = "meta-outgoing"
 _TAG_INCOMING = "incoming"
 _TAG_OUTGOING = "outgoing"
 _TAG_PLACEHOLDER = "placeholder"
+_SPINNER_FRAMES = ("◜", "◠", "◝", "◞", "◡", "◟")
 
 
 def _plural_messages(count: int) -> str:
@@ -49,12 +51,31 @@ class MessagesPanel(ttk.Labelframe):
     def __init__(self, master: tk.Misc) -> None:
         """Build the header and the read-only text area."""
         super().__init__(master, text=TITLE, padding=theme.PANEL_PADDING)
+        self._on_refresh_chat: Callable[[], None] | None = None
+        self._on_preload_media: Callable[[], None] | None = None
+        self._image_refs: list[tk.PhotoImage] = []
+        self._spinner_job: str | None = None
+        self._spinner_index = 0
+        self._loading = False
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(2, weight=1)
 
         self._title = ttk.Label(self, text=_NO_SELECTION_TITLE, font=theme.FONT_TITLE)
         self._title.grid(row=0, column=0, columnspan=2, sticky="w")
+
+        actions = ttk.Frame(self)
+        actions.grid(row=0, column=2, sticky="e")
+        self._spinner = ttk.Label(actions, text="", width=2, foreground=theme.COLOR_MUTED)
+        self._spinner.grid(row=0, column=0, padx=(0, theme.GAP))
+        self._refresh_button = ttk.Button(actions, text="Обновить чат", command=self._request_refresh)
+        self._refresh_button.grid(row=0, column=1, padx=(0, theme.GAP))
+        self._preload_button = ttk.Button(
+            actions,
+            text="Загрузить медиа",
+            command=self._request_preload,
+        )
+        self._preload_button.grid(row=0, column=2)
 
         self._subtitle = ttk.Label(
             self, text="", font=theme.FONT_META, foreground=theme.COLOR_MUTED
@@ -85,6 +106,7 @@ class MessagesPanel(ttk.Labelframe):
         """Reset the header and show a hint instead of a transcript."""
         self._title.configure(text=_NO_SELECTION_TITLE)
         self._subtitle.configure(text="")
+        self._image_refs = []
         self._replace_body(((text, _TAG_PLACEHOLDER),))
 
     def show_dialog(self, dialog: Dialog, messages: Sequence[Message]) -> None:
@@ -98,19 +120,45 @@ class MessagesPanel(ttk.Labelframe):
             self._replace_body(((_EMPTY_DIALOG_TEXT, _TAG_PLACEHOLDER),))
             return
 
-        chunks: list[tuple[str, str]] = []
-        for message in messages:
-            outgoing = message.outgoing
-            chunks.append(
-                (
-                    f"{message.author} · {message.time_label}\n",
-                    _TAG_META_OUTGOING if outgoing else _TAG_META,
-                )
-            )
-            chunks.append(
-                (f"{message.text}\n\n", _TAG_OUTGOING if outgoing else _TAG_INCOMING)
-            )
-        self._replace_body(chunks)
+        self._replace_message_body(messages)
+
+    def configure_actions(
+        self,
+        *,
+        on_refresh_chat: Callable[[], None] | None = None,
+        on_preload_media: Callable[[], None] | None = None,
+    ) -> None:
+        """Set callbacks for message-panel action buttons."""
+        self._on_refresh_chat = on_refresh_chat
+        self._on_preload_media = on_preload_media
+
+    def _request_refresh(self) -> None:
+        if self._on_refresh_chat is not None:
+            self._on_refresh_chat()
+
+    def _request_preload(self) -> None:
+        if self._on_preload_media is not None:
+            self._on_preload_media()
+
+    def set_loading(self, loading: bool) -> None:
+        """Show or hide spinner and lock actions while background work runs."""
+        if loading:
+            if self._loading:
+                return
+            self._loading = True
+            self._refresh_button.configure(state="disabled")
+            self._preload_button.configure(state="disabled")
+            self._spinner_index = 0
+            self._tick_spinner()
+            return
+
+        self._loading = False
+        self._refresh_button.configure(state="normal")
+        self._preload_button.configure(state="normal")
+        if self._spinner_job is not None:
+            self.after_cancel(self._spinner_job)
+            self._spinner_job = None
+        self._spinner.configure(text="")
 
     @property
     def transcript(self) -> str:
@@ -124,6 +172,7 @@ class MessagesPanel(ttk.Labelframe):
 
     def _replace_body(self, chunks: Sequence[tuple[str, str]]) -> None:
         """Rewrite the text area with ``(text, tag)`` pairs, keeping it read-only."""
+        self._image_refs = []
         self._text.configure(state="normal")
         try:
             self._text.delete("1.0", "end")
@@ -133,7 +182,57 @@ class MessagesPanel(ttk.Labelframe):
             # Must not stay editable even if inserting raises: the transcript is
             # a view, not an input field.
             self._text.configure(state="disabled")
-        self._text.see("1.0")
+        self._text.see("end")
+
+    def _media_chunks(self, message: Message, body_tag: str) -> list[tuple[str, str]]:
+        media_path = (message.media_path or "").strip()
+        if not media_path:
+            return []
+
+        if message.media_kind == "photo":
+            image = self._load_photo(media_path)
+            if image is not None:
+                self._image_refs.append(image)
+                self._text.insert("end", "\n", body_tag)
+                self._text.image_create("end", image=image)
+                self._text.insert("end", "\n", body_tag)
+                return []
+
+            return [("\n", body_tag), (f"[Фото] {media_path}\n", _TAG_PLACEHOLDER)]
+
+        label = "Видео" if message.media_kind == "video" else "Файл"
+        return [(f"[{label}] {media_path}\n", _TAG_PLACEHOLDER)]
+
+    @staticmethod
+    def _load_photo(path: str) -> tk.PhotoImage | None:
+        file_path = Path(path)
+        if not file_path.exists():
+            return None
+        try:
+            return tk.PhotoImage(file=str(file_path))
+        except tk.TclError:
+            return None
+
+    def _replace_message_body(self, messages: Sequence[Message]) -> None:
+        self._image_refs = []
+        self._text.configure(state="normal")
+        try:
+            self._text.delete("1.0", "end")
+            for message in messages:
+                outgoing = message.outgoing
+                body_tag = _TAG_OUTGOING if outgoing else _TAG_INCOMING
+                self._text.insert(
+                    "end",
+                    f"{message.author} · {message.time_label}\n",
+                    _TAG_META_OUTGOING if outgoing else _TAG_META,
+                )
+                self._text.insert("end", f"{message.text}\n", body_tag)
+                for text, tag in self._media_chunks(message, body_tag):
+                    self._text.insert("end", text, tag)
+                self._text.insert("end", "\n", body_tag)
+        finally:
+            self._text.configure(state="disabled")
+        self._text.see("end")
 
     def _configure_tags(self) -> None:
         """Set up the fonts, colours and alignment used by the transcript."""
@@ -161,3 +260,13 @@ class MessagesPanel(ttk.Labelframe):
             justify="center",
             spacing1=24,
         )
+
+    def _tick_spinner(self) -> None:
+        if not self._loading:
+            self._spinner.configure(text="")
+            self._spinner_job = None
+            return
+
+        self._spinner.configure(text=_SPINNER_FRAMES[self._spinner_index % len(_SPINNER_FRAMES)])
+        self._spinner_index += 1
+        self._spinner_job = self.after(120, self._tick_spinner)

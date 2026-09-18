@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import tkinter as tk
 from tkinter import ttk
+from unittest.mock import patch
 
 from app.models import Account, AccountStatus, Dialog, DialogKind, Message
 from Front.accounts.accounts_panel import AccountsPanel
@@ -81,6 +82,149 @@ def test_accounts_panel_select_first_picks_the_top_row(
     panel.select_first()
     tk_root.update()
     assert [account.id for account in seen] == ["a-1"]
+
+
+def test_messages_panel_exposes_refresh_and_preload_actions(tk_root: tk.Tk) -> None:
+    """Action buttons call configured callbacks from the message panel."""
+    panel = MessagesPanel(tk_root)
+    events: list[str] = []
+    panel.configure_actions(
+        on_refresh_chat=lambda: events.append("refresh"),
+        on_preload_media=lambda: events.append("preload"),
+    )
+
+    panel._request_refresh()  # pylint: disable=protected-access
+    panel._request_preload()  # pylint: disable=protected-access
+
+    assert events == ["refresh", "preload"]
+
+
+def test_messages_panel_shows_cached_media_path(tk_root: tk.Tk) -> None:
+    """Cached non-photo media path appears in transcript body."""
+    panel = MessagesPanel(tk_root)
+    dialog = Dialog(id="d-1", account_id="a-1", title="Чат", kind=DialogKind.GROUP, unread=0)
+    panel.show_dialog(
+        dialog,
+        [
+            Message(
+                author="Я",
+                sent_at="2026-09-15T08:40:00",
+                text="Смотри",
+                outgoing=True,
+                media_kind="video",
+                media_path="C:/cache/video.mp4",
+                media_caption="",
+                media_mime="video/mp4",
+            )
+        ],
+    )
+
+    assert "[Видео] C:/cache/video.mp4" in panel.transcript
+
+
+def test_messages_panel_renders_media_inline_not_at_end(tk_root: tk.Tk) -> None:
+    """Media marker is rendered with its message block, before later messages."""
+    panel = MessagesPanel(tk_root)
+    dialog = Dialog(id="d-1", account_id="a-1", title="Чат", kind=DialogKind.GROUP, unread=0)
+    panel.show_dialog(
+        dialog,
+        [
+            Message(
+                author="Я",
+                sent_at="2026-09-15T08:40:00",
+                text="Первое",
+                outgoing=True,
+                media_kind="video",
+                media_path="C:/cache/video.mp4",
+                media_caption="",
+                media_mime="video/mp4",
+            ),
+            Message(
+                author="Контакт",
+                sent_at="2026-09-15T08:41:00",
+                text="Второе",
+                outgoing=False,
+                media_kind="none",
+                media_path="",
+                media_caption="",
+                media_mime="",
+            ),
+        ],
+    )
+
+    transcript = panel.transcript
+    assert transcript.index("Первое") < transcript.index("[Видео] C:/cache/video.mp4")
+    assert transcript.index("[Видео] C:/cache/video.mp4") < transcript.index("Второе")
+
+
+def test_messages_panel_embeds_photo_inline_when_loadable(tk_root: tk.Tk) -> None:
+    """Loadable photo media is inserted as an embedded image in transcript."""
+    panel = MessagesPanel(tk_root)
+    dialog = Dialog(id="d-1", account_id="a-1", title="Чат", kind=DialogKind.GROUP, unread=0)
+    image = tk.PhotoImage(master=tk_root, width=1, height=1)
+    with patch.object(MessagesPanel, "_load_photo", return_value=image):
+        panel.show_dialog(
+            dialog,
+            [
+                Message(
+                    author="Я",
+                    sent_at="2026-09-15T08:40:00",
+                    text="Фото",
+                    outgoing=True,
+                    media_kind="photo",
+                    media_path="C:/cache/photo.png",
+                    media_caption="",
+                    media_mime="image/png",
+                )
+            ],
+        )
+
+    tokens = panel.text.dump("1.0", "end", image=True)
+    assert any(token[0] == "image" for token in tokens)
+
+
+def test_messages_panel_scrolls_to_newest_messages(tk_root: tk.Tk) -> None:
+    """After redraw transcript viewport should be positioned at the bottom."""
+    panel = MessagesPanel(tk_root)
+    panel.text.configure(height=4)
+    dialog = Dialog(id="d-1", account_id="a-1", title="Чат", kind=DialogKind.GROUP, unread=0)
+    messages = [
+        Message(
+            author="Контакт",
+            sent_at="2026-09-15T08:40:00",
+            text=f"Сообщение {index}",
+            outgoing=False,
+            media_kind="none",
+            media_path="",
+            media_caption="",
+            media_mime="",
+        )
+        for index in range(30)
+    ]
+    panel.show_dialog(dialog, messages)
+    tk_root.update_idletasks()
+
+    top, bottom = panel.text.yview()
+    assert top > 0.0
+    assert bottom == 1.0
+
+
+def test_messages_panel_shows_spinner_while_loading(tk_root: tk.Tk) -> None:
+    """Spinner appears and buttons are locked during background loading state."""
+    panel = MessagesPanel(tk_root)
+    panel.set_loading(True)
+    tk_root.update()
+
+    assert panel._spinner.cget("text")  # pylint: disable=protected-access
+    assert str(panel._refresh_button.cget("state")) == "disabled"  # pylint: disable=protected-access
+    assert str(panel._preload_button.cget("state")) == "disabled"  # pylint: disable=protected-access
+
+    panel.set_loading(False)
+    tk_root.update()
+
+    assert panel._spinner.cget("text") == ""  # pylint: disable=protected-access
+    assert str(panel._refresh_button.cget("state")) == "normal"  # pylint: disable=protected-access
+    assert str(panel._preload_button.cget("state")) == "normal"  # pylint: disable=protected-access
 
 
 def test_accounts_panel_select_first_is_safe_when_empty(tk_root: tk.Tk) -> None:
@@ -297,7 +441,19 @@ def test_messages_panel_replaces_the_previous_dialog(
     dialog = fake_repository.dialogs("a-1")[0]
     panel.show_dialog(dialog, fake_repository.messages("d-1"))
     panel.show_dialog(
-        dialog, [Message(author="Кто-то", sent_at="", text="Новое", outgoing=False)]
+        dialog,
+        [
+            Message(
+                author="Кто-то",
+                sent_at="",
+                text="Новое",
+                outgoing=False,
+                media_kind="none",
+                media_path="",
+                media_caption="",
+                media_mime="",
+            )
+        ],
     )
 
     assert "Привет" not in panel.transcript

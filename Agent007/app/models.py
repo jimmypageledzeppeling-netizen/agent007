@@ -154,6 +154,10 @@ class Message:
     sent_at: str
     text: str
     outgoing: bool
+    media_kind: str
+    media_path: str
+    media_caption: str
+    media_mime: str
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> Message:
@@ -163,6 +167,10 @@ class Message:
             sent_at=str(raw.get("sent_at", "")).strip(),
             text=str(raw.get("text", "")),
             outgoing=bool(raw.get("outgoing", False)),
+            media_kind=str(raw.get("media_kind", "none") or "none").strip().lower(),
+            media_path=str(raw.get("media_path", "")).strip(),
+            media_caption=str(raw.get("media_caption", "")),
+            media_mime=str(raw.get("media_mime", "")).strip(),
         )
 
     @property

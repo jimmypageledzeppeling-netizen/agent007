@@ -15,8 +15,10 @@ from __future__ import annotations
 import asyncio
 import json
 import random
+import re
 import threading
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
@@ -69,6 +71,16 @@ class DataRepository(Protocol):
 
     def clear_account_chats(self, account_id: str) -> tuple[int, int]:
         """Clear all dialogs for one account and return (cleared, failed)."""
+        raise NotImplementedError
+
+    def refresh_dialog_messages(self, dialog_id: str) -> list[Message]:
+        """Fetch latest dialog messages from source."""
+        raise NotImplementedError
+
+    def preload_dialog_media(
+        self, account_id: str, dialog_id: str, limit: int | None = None
+    ) -> tuple[int, int, int]:
+        """Download missing media for dialog; return (downloaded, skipped, failed)."""
         raise NotImplementedError
 
 
@@ -127,6 +139,16 @@ class JsonFileRepository:
     def clear_account_chats(self, account_id: str) -> tuple[int, int]:
         """Reject chat cleanup outside live mode."""
         raise RuntimeError("Очистка чатов доступна только в DATA_MODE=live")
+
+    def refresh_dialog_messages(self, dialog_id: str) -> list[Message]:
+        """Reject dialog refresh outside live mode."""
+        raise RuntimeError("Обновление чата доступно только в DATA_MODE=live")
+
+    def preload_dialog_media(
+        self, account_id: str, dialog_id: str, limit: int | None = None
+    ) -> tuple[int, int, int]:
+        """Reject media preload outside live mode."""
+        raise RuntimeError("Загрузка медиа доступна только в DATA_MODE=live")
 
     def _document(self, filename: str) -> dict[str, Any]:
         """Return a parsed file, reading it from disk on first use only."""
@@ -340,10 +362,12 @@ class LiveRepository:
         self._settings = settings or get_settings()
         self._data_dir = self._settings.data_path
         self._sessions_dir = self._settings.sessions_path
+        self._media_cache_dir = self._settings.media_cache_path
         self._accounts_path = self._data_dir / LIVE_ACCOUNTS_FILENAME
         self._workers: dict[str, TelegramWorker] = {}
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._media_cache_dir.mkdir(parents=True, exist_ok=True)
 
     def accounts(self) -> list[Account]:
         """Return connected accounts persisted in accounts.json."""
@@ -382,6 +406,13 @@ class LiveRepository:
 
     def messages(self, dialog_id: str) -> list[Message]:
         """Read messages from Telegram for one dialog id produced by dialogs()."""
+        return self._load_dialog_messages(dialog_id)
+
+    def refresh_dialog_messages(self, dialog_id: str) -> list[Message]:
+        """Force reload latest messages for a dialog."""
+        return self._load_dialog_messages(dialog_id)
+
+    def _load_dialog_messages(self, dialog_id: str) -> list[Message]:
         account_id, peer_id = self._split_dialog_id(dialog_id)
         if account_id is None:
             return []
@@ -395,15 +426,32 @@ class LiveRepository:
                 return []
 
             items = await client.get_messages(peer_id, limit=100)
+            media_index = self._load_dialog_media_index(account_id, dialog_id)
             result: list[Message] = []
             for item in reversed(items):
                 author = "Я" if item.out else self._author_name(item)
+                media_kind = self._media_kind(item)
+                media_path = ""
+                media_caption = ""
+                media_mime = ""
+                cached = media_index.get(str(getattr(item, "id", "")))
+                if cached:
+                    candidate = str(cached.get("media_path", "")).strip()
+                    if candidate and Path(candidate).exists():
+                        media_path = candidate
+                        media_kind = str(cached.get("media_kind", media_kind)) or media_kind
+                        media_caption = str(cached.get("media_caption", ""))
+                        media_mime = str(cached.get("media_mime", "")).strip()
                 result.append(
                     Message(
                         author=author,
                         sent_at=item.date.isoformat() if item.date else "",
                         text=item.message or "",
                         outgoing=bool(item.out),
+                        media_kind=media_kind,
+                        media_path=media_path,
+                        media_caption=media_caption,
+                        media_mime=media_mime,
                     )
                 )
             return result
@@ -413,6 +461,79 @@ class LiveRepository:
         except (errors.RPCError, OSError, ValueError, RuntimeError, TimeoutError):
             _LOGGER.exception("Could not load messages for dialog %s", dialog_id)
             return []
+
+    def preload_dialog_media(
+        self, account_id: str, dialog_id: str, limit: int | None = None
+    ) -> tuple[int, int, int]:
+        """Download uncached media files for dialog and update local media index."""
+        worker = self._get_worker(account_id)
+        if worker is None:
+            raise RuntimeError("Аккаунт не подключён")
+
+        _, peer_id = self._split_dialog_id(dialog_id)
+        if peer_id == 0:
+            return (0, 0, 0)
+
+        target_limit = max(1, int(limit or 100))
+
+        async def _preload(client: TelegramClient) -> tuple[int, int, int]:
+            if not await client.is_user_authorized():
+                return (0, 0, 0)
+
+            index = self._load_dialog_media_index(account_id, dialog_id)
+            downloaded = 0
+            skipped = 0
+            failed = 0
+
+            items = await client.get_messages(peer_id, limit=target_limit)
+            for item in items:
+                message_id = int(getattr(item, "id", 0) or 0)
+                if message_id <= 0:
+                    continue
+
+                try:
+                    media_kind = self._media_kind(item)
+                    if media_kind == "none":
+                        continue
+
+                    cached = index.get(str(message_id), {})
+                    cached_path = str(cached.get("media_path", "")).strip()
+                    if cached_path and Path(cached_path).exists():
+                        skipped += 1
+                        continue
+
+                    message_dir = self._message_cache_dir(account_id, dialog_id, message_id)
+                    message_dir.mkdir(parents=True, exist_ok=True)
+                    file_path = await client.download_media(item, file=str(message_dir))
+                    if not file_path:
+                        failed += 1
+                        continue
+
+                    index[str(message_id)] = {
+                        "media_kind": media_kind,
+                        "media_path": str(file_path),
+                        "media_caption": str(getattr(item, "message", "") or ""),
+                        "media_mime": self._media_mime(item),
+                        "cached_at": self._now_iso(),
+                    }
+                    downloaded += 1
+                except Exception:  # pragma: no cover - runtime dependency
+                    _LOGGER.exception(
+                        "Could not preload media for dialog %s message %s",
+                        dialog_id,
+                        message_id,
+                    )
+                    failed += 1
+                    continue
+
+            self._save_dialog_media_index(account_id, dialog_id, index)
+            return (downloaded, skipped, failed)
+
+        try:
+            return worker.run_rpc(_preload, timeout=180.0)
+        except (errors.RPCError, OSError, RuntimeError, TimeoutError):
+            _LOGGER.exception("Could not preload media for %s", dialog_id)
+            raise RuntimeError("Не удалось загрузить медиа") from None
 
     def add_account(
         self,
@@ -622,6 +743,24 @@ class LiveRepository:
                 return name
         return "Собеседник"
 
+    @staticmethod
+    def _media_kind(item: Any) -> str:
+        if getattr(item, "photo", None) is not None:
+            return "photo"
+        if getattr(item, "video", None) is not None:
+            return "video"
+        if getattr(item, "document", None) is not None:
+            return "document"
+        if getattr(item, "media", None) is not None:
+            return "document"
+        return "none"
+
+    @staticmethod
+    def _media_mime(item: Any) -> str:
+        document = getattr(item, "document", None)
+        mime = getattr(document, "mime_type", "") if document is not None else ""
+        return str(mime or "").strip()
+
     def _rename_session(self, old_name: str, new_name: str) -> None:
         old_base = self._sessions_dir / old_name
         new_base = self._sessions_dir / new_name
@@ -664,6 +803,82 @@ class LiveRepository:
 
         document["accounts"] = records
         self._write_document(document)
+
+    @staticmethod
+    def _sanitize_segment(value: str) -> str:
+        sanitized = re.sub(r"[^0-9A-Za-z._-]+", "_", value.strip())
+        return sanitized.strip("._") or "unknown"
+
+    @classmethod
+    def _sanitize_phone(cls, phone: str) -> str:
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        if digits:
+            return digits
+        return cls._sanitize_segment(phone)
+
+    def _account_phone(self, account_id: str) -> str:
+        record = self._find_record(account_id)
+        if record is None:
+            return "unknown"
+        phone = str(record.get("phone", "")).strip()
+        if not phone:
+            return "unknown"
+        return self._sanitize_phone(phone)
+
+    def _dialog_cache_dir(self, account_id: str, dialog_id: str) -> Path:
+        return (
+            self._media_cache_dir
+            / self._account_phone(account_id)
+            / self._sanitize_segment(dialog_id)
+        )
+
+    def _message_cache_dir(self, account_id: str, dialog_id: str, message_id: int) -> Path:
+        return self._dialog_cache_dir(account_id, dialog_id) / str(message_id)
+
+    def _dialog_media_index_path(self, account_id: str, dialog_id: str) -> Path:
+        return self._dialog_cache_dir(account_id, dialog_id) / "index.json"
+
+    def _load_dialog_media_index(self, account_id: str, dialog_id: str) -> dict[str, dict[str, str]]:
+        path = self._dialog_media_index_path(account_id, dialog_id)
+        if not path.exists():
+            return {}
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            _LOGGER.exception("Could not read media index %s", path)
+            return {}
+        if not isinstance(document, dict):
+            return {}
+
+        parsed: dict[str, dict[str, str]] = {}
+        for key, value in document.items():
+            if not isinstance(key, str) or not isinstance(value, Mapping):
+                continue
+            row: dict[str, str] = {}
+            for field in ("media_kind", "media_path", "media_caption", "media_mime", "cached_at"):
+                raw = value.get(field)
+                if raw is not None:
+                    row[field] = str(raw)
+            if row:
+                parsed[key] = row
+        return parsed
+
+    def _save_dialog_media_index(
+        self,
+        account_id: str,
+        dialog_id: str,
+        index: Mapping[str, Mapping[str, str]],
+    ) -> None:
+        path = self._dialog_media_index_path(account_id, dialog_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload: dict[str, dict[str, str]] = {}
+        for key, value in index.items():
+            payload[str(key)] = {k: str(v) for k, v in value.items()}
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now(UTC).isoformat()
 
 
 def create_repository(*, settings: Settings | None = None) -> DataRepository:

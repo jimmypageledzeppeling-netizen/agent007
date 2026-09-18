@@ -80,9 +80,22 @@ def test_every_dialog_kind_has_both_captions() -> None:
 def test_message_is_parsed_from_a_full_record() -> None:
     """Author, text and direction reach the transcript."""
     message = Message.from_dict(
-        {"author": "Я", "sent_at": "2026-09-15T08:40:00", "text": "Привет", "outgoing": True}
+        {
+            "author": "Я",
+            "sent_at": "2026-09-15T08:40:00",
+            "text": "Привет",
+            "outgoing": True,
+            "media_kind": "photo",
+            "media_path": "Agent007/media/7999/d-1/42/photo.jpg",
+            "media_caption": "Подпись",
+            "media_mime": "image/jpeg",
+        }
     )
     assert (message.author, message.text, message.outgoing) == ("Я", "Привет", True)
+    assert message.media_kind == "photo"
+    assert message.media_path.endswith("photo.jpg")
+    assert message.media_caption == "Подпись"
+    assert message.media_mime == "image/jpeg"
 
 
 def test_message_without_author_is_rejected() -> None:
@@ -94,6 +107,15 @@ def test_message_without_author_is_rejected() -> None:
 def test_message_defaults_to_incoming() -> None:
     """Only an explicit flag marks a message as sent by the operator."""
     assert Message.from_dict({"author": "Кто-то", "text": "Привет"}).outgoing is False
+
+
+def test_message_media_defaults_are_backward_compatible() -> None:
+    """Legacy text-only records should still parse without media fields."""
+    message = Message.from_dict({"author": "Кто-то", "text": "Привет"})
+    assert message.media_kind == "none"
+    assert message.media_path == ""
+    assert message.media_caption == ""
+    assert message.media_mime == ""
 
 
 def test_message_time_is_formatted_for_display() -> None:

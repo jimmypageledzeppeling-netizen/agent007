@@ -15,6 +15,12 @@ Set in `.env`:
 - `DATA_MODE=test` — read JSON fixtures from `Agent007/data`
 - `DATA_MODE=live` — live mode placeholder (UI opens with empty lists)
 
+## Telegram media cache and refresh
+
+- `MEDIA_CACHE_DIR` controls where downloaded media is stored (default `Agent007/media`).
+- In messages panel, use `Загрузить медиа` to cache Telegram media for selected chat.
+- Use `Обновить чат` to pull latest messages; already cached media is reused instantly.
+
 ## Telegram bulk clear throttling (.env)
 
 For account menu action "Очистить" (clear all chats), configure delay between dialog deletions:

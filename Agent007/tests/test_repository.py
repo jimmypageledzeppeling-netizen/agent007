@@ -209,6 +209,20 @@ def test_factory_uses_live_repository_in_live_mode() -> None:
     assert isinstance(repository, LiveRepository)
 
 
+def test_json_repository_rejects_refresh_dialog_messages() -> None:
+    """Refreshing Telegram chat is unavailable in fixture mode."""
+    repository = JsonFileRepository(settings=Settings(_env_file=None))
+    with pytest.raises(RuntimeError, match="Обновление чата"):
+        repository.refresh_dialog_messages("a-1:1")
+
+
+def test_json_repository_rejects_preload_dialog_media() -> None:
+    """Media preload is live-only and must fail explicitly in test mode."""
+    repository = JsonFileRepository(settings=Settings(_env_file=None))
+    with pytest.raises(RuntimeError, match="Загрузка медиа"):
+        repository.preload_dialog_media("a-1", "a-1:1")
+
+
 def test_live_repository_reads_empty_when_accounts_file_is_missing(tmp_path: Path) -> None:
     """Live mode starts empty before the first connected account is saved."""
     settings = Settings(
@@ -340,7 +354,7 @@ def test_live_repository_add_account_uses_worker_and_reports_status(
     )
 
     assert account.id == "tg-42"
-    assert statuses == ["Подключение к Telegram..."]
+    assert statuses == ["Подключение к Telegram...", "Подключение к Telegram..."]
     assert events.index("join:phone-+7999") < events.index("rename:phone-+7999->tg-42")
     assert repository.accounts()[0].id == "tg-42"
 
@@ -405,3 +419,292 @@ def test_live_repository_clears_all_account_chats(
     assert (cleared, failed) == (2, 0)
     assert deleted == ["peer-1", "peer-2"]
     assert sleeps == [0.33, 0.33]
+
+
+def test_live_repository_media_cache_dir_uses_account_phone(tmp_path: Path) -> None:
+    """Media cache path is grouped by sanitized account phone and dialog id."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        media_cache_dir=tmp_path / "media",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+    repository._upsert_account(  # pylint: disable=protected-access
+        Account(id="tg-7", name="Name", phone="+7 (999) 111-22-33", status=AccountStatus.ONLINE)
+    )
+
+    dialog_dir = repository._dialog_cache_dir("tg-7", "tg-7:123")  # pylint: disable=protected-access
+    assert dialog_dir == settings.media_cache_path / "79991112233" / "tg-7_123"
+
+
+def test_live_repository_media_index_roundtrip(tmp_path: Path) -> None:
+    """Media index survives save/load for deterministic cache reuse."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        media_cache_dir=tmp_path / "media",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+    repository._upsert_account(  # pylint: disable=protected-access
+        Account(id="tg-7", name="Name", phone="+7999", status=AccountStatus.ONLINE)
+    )
+
+    index = {
+        "42": {
+            "media_kind": "photo",
+            "media_path": str(settings.media_cache_path / "7999" / "tg-7_1" / "42" / "img.jpg"),
+            "media_caption": "cap",
+            "media_mime": "image/jpeg",
+            "cached_at": "2026-01-01T00:00:00+00:00",
+        }
+    }
+    repository._save_dialog_media_index("tg-7", "tg-7:1", index)  # pylint: disable=protected-access
+
+    loaded = repository._load_dialog_media_index("tg-7", "tg-7:1")  # pylint: disable=protected-access
+    assert loaded == index
+
+
+def test_live_repository_preload_media_skips_cached_files(
+    tmp_path: Path,
+) -> None:
+    """Preload should skip already-cached media files and return proper counters."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        media_cache_dir=tmp_path / "media",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+    repository._upsert_account(  # pylint: disable=protected-access
+        Account(id="tg-7", name="Name", phone="+7999", status=AccountStatus.ONLINE)
+    )
+
+    class _Item:
+        def __init__(self, message_id: int, *, has_photo: bool) -> None:
+            self.id = message_id
+            self.photo = object() if has_photo else None
+            self.video = None
+            self.document = None
+            self.media = self.photo
+            self.message = "caption"
+
+    class FakeWorker:
+        def is_alive(self) -> bool:
+            return True
+
+        def run_rpc(self, operation: Callable[[object], object], timeout: float = 30.0) -> object:
+            class FakeClient:
+                async def is_user_authorized(self) -> bool:
+                    return True
+
+                async def get_messages(self, peer_id: int, limit: int = 100):
+                    return [_Item(1, has_photo=True), _Item(2, has_photo=True)]
+
+                async def download_media(self, item: object, file: str):
+                    target = Path(file) / f"{getattr(item, 'id', 0)}.jpg"
+                    target.write_text("x", encoding="utf-8")
+                    return str(target)
+
+            return __import__("asyncio").run(operation(FakeClient()))
+
+    message_dir = repository._message_cache_dir("tg-7", "tg-7:12", 1)  # pylint: disable=protected-access
+    message_dir.mkdir(parents=True, exist_ok=True)
+    cached_file = message_dir / "cached.jpg"
+    cached_file.write_text("cached", encoding="utf-8")
+    repository._save_dialog_media_index(  # pylint: disable=protected-access
+        "tg-7",
+        "tg-7:12",
+        {
+            "1": {
+                "media_kind": "photo",
+                "media_path": str(cached_file),
+                "media_caption": "cached",
+                "media_mime": "image/jpeg",
+                "cached_at": "2026-01-01T00:00:00+00:00",
+            }
+        },
+    )
+    repository._workers["tg-7"] = FakeWorker()  # pylint: disable=protected-access
+
+    downloaded, skipped, failed = repository.preload_dialog_media("tg-7", "tg-7:12", limit=10)
+
+    assert (downloaded, skipped, failed) == (1, 1, 0)
+
+
+def test_live_repository_preload_media_continues_after_item_failure(tmp_path: Path) -> None:
+    """One broken media item must not stop preload of remaining messages."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        media_cache_dir=tmp_path / "media",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+    repository._upsert_account(  # pylint: disable=protected-access
+        Account(id="tg-7", name="Name", phone="+7999", status=AccountStatus.ONLINE)
+    )
+
+    class _Item:
+        def __init__(self, message_id: int) -> None:
+            self.id = message_id
+            self.photo = object()
+            self.video = None
+            self.document = None
+            self.media = self.photo
+            self.message = "caption"
+
+    class FakeWorker:
+        def is_alive(self) -> bool:
+            return True
+
+        def run_rpc(self, operation: Callable[[object], object], timeout: float = 30.0) -> object:
+            class FakeClient:
+                async def is_user_authorized(self) -> bool:
+                    return True
+
+                async def get_messages(self, peer_id: int, limit: int = 100):
+                    return [_Item(1), _Item(2)]
+
+                async def download_media(self, item: object, file: str):
+                    if getattr(item, "id", 0) == 1:
+                        raise OSError("broken file")
+                    target = Path(file) / f"{getattr(item, 'id', 0)}.jpg"
+                    target.write_text("x", encoding="utf-8")
+                    return str(target)
+
+            return __import__("asyncio").run(operation(FakeClient()))
+
+    repository._workers["tg-7"] = FakeWorker()  # pylint: disable=protected-access
+
+    downloaded, skipped, failed = repository.preload_dialog_media("tg-7", "tg-7:12", limit=10)
+
+    assert (downloaded, skipped, failed) == (1, 0, 1)
+
+
+def test_live_repository_messages_uses_cached_media_path(tmp_path: Path) -> None:
+    """messages() should expose cached media path immediately when file already exists."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        media_cache_dir=tmp_path / "media",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+    repository._upsert_account(  # pylint: disable=protected-access
+        Account(id="tg-9", name="Name", phone="+7888", status=AccountStatus.ONLINE)
+    )
+
+    message_dir = repository._message_cache_dir("tg-9", "tg-9:55", 99)  # pylint: disable=protected-access
+    message_dir.mkdir(parents=True, exist_ok=True)
+    cached_file = message_dir / "p.jpg"
+    cached_file.write_text("cached", encoding="utf-8")
+    repository._save_dialog_media_index(  # pylint: disable=protected-access
+        "tg-9",
+        "tg-9:55",
+        {
+            "99": {
+                "media_kind": "photo",
+                "media_path": str(cached_file),
+                "media_caption": "Фото",
+                "media_mime": "image/jpeg",
+                "cached_at": "2026-01-01T00:00:00+00:00",
+            }
+        },
+    )
+
+    class _Item:
+        id = 99
+        out = False
+        sender = None
+        date = None
+        message = "Caption"
+        photo = object()
+        video = None
+        document = None
+        media = photo
+
+    class FakeWorker:
+        def is_alive(self) -> bool:
+            return True
+
+        def run_rpc(self, operation: Callable[[object], object], timeout: float = 30.0) -> object:
+            class FakeClient:
+                async def is_user_authorized(self) -> bool:
+                    return True
+
+                async def get_messages(self, peer_id: int, limit: int = 100):
+                    return [_Item()]
+
+            return __import__("asyncio").run(operation(FakeClient()))
+
+    repository._workers["tg-9"] = FakeWorker()  # pylint: disable=protected-access
+
+    messages = repository.messages("tg-9:55")
+
+    assert len(messages) == 1
+    assert messages[0].media_kind == "photo"
+    assert messages[0].media_path == str(cached_file)
+
+
+def test_live_repository_refresh_dialog_messages_delegates_to_messages(tmp_path: Path) -> None:
+    """Refresh API should return latest values using the same loading pipeline."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        media_cache_dir=tmp_path / "media",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+
+    class FakeWorker:
+        def is_alive(self) -> bool:
+            return True
+
+        def run_rpc(self, operation: Callable[[object], object], timeout: float = 30.0) -> object:
+            class FakeClient:
+                async def is_user_authorized(self) -> bool:
+                    return True
+
+                async def get_messages(self, peer_id: int, limit: int = 100):
+                    class _Item:
+                        id = 1
+                        out = False
+                        sender = None
+                        date = None
+                        message = "new"
+                        photo = None
+                        video = None
+                        document = None
+                        media = None
+
+                    return [_Item()]
+
+            return __import__("asyncio").run(operation(FakeClient()))
+
+    repository._upsert_account(  # pylint: disable=protected-access
+        Account(id="tg-11", name="Name", phone="+7111", status=AccountStatus.ONLINE)
+    )
+    repository._workers["tg-11"] = FakeWorker()  # pylint: disable=protected-access
+    refreshed = repository.refresh_dialog_messages("tg-11:5")
+    assert len(refreshed) == 1
+    assert refreshed[0].text == "new"

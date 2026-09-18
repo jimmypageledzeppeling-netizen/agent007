@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     log_dir: Path = Path("Log")
     data_dir: Path = Path("Agent007/data")
     sessions_dir: Path = Path("Agent007/sessions")
+    media_cache_dir: Path = Path("Agent007/media")
     data_mode: str = "test"
 
     mysql_host: str = "127.0.0.1"
@@ -77,6 +78,12 @@ class Settings(BaseSettings):
     def sessions_path(self) -> Path:
         """Absolute path of directory with Telegram session files."""
         return self._resolve(self.sessions_dir)
+
+    @computed_field
+    @property
+    def media_cache_path(self) -> Path:
+        """Absolute path of directory with cached Telegram media files."""
+        return self._resolve(self.media_cache_dir)
 
     @property
     def use_live_data(self) -> bool:

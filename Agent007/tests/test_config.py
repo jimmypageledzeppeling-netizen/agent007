@@ -41,6 +41,18 @@ def test_absolute_log_dir_is_kept(tmp_path: Path) -> None:
     assert settings.log_path == tmp_path
 
 
+def test_relative_media_cache_dir_resolves_against_project_root() -> None:
+    """A relative MEDIA_CACHE_DIR is anchored to repository root."""
+    settings = Settings(_env_file=None, media_cache_dir=Path("Agent007/media"))
+    assert settings.media_cache_path == PROJECT_ROOT / "Agent007/media"
+
+
+def test_absolute_media_cache_dir_is_kept(tmp_path: Path) -> None:
+    """An absolute MEDIA_CACHE_DIR is used as-is."""
+    settings = Settings(_env_file=None, media_cache_dir=tmp_path)
+    assert settings.media_cache_path == tmp_path
+
+
 def test_telegram_is_unconfigured_by_default() -> None:
     """Defaults must not pretend credentials exist."""
     assert Settings(_env_file=None).is_telegram_configured is False

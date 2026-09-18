@@ -6,6 +6,7 @@ import tkinter as tk
 
 import pytest
 
+from app.models import Message
 from Front.accounts.accounts_panel import AccountsPanel
 from Front.chats.dialogs_panel import DialogsPanel
 from Front.main_window import COLUMN_WEIGHTS, UNIFORM_GROUP, MainWindow
@@ -166,6 +167,49 @@ def test_clearing_account_chats_calls_repository_and_refreshes_dialogs(
     window.master.update()
 
     assert fake_repository.clear_calls == ["a-1"]
+    rows = window.dialogs_panel.tree.get_children()
+    assert [window.dialogs_panel.tree.item(iid, "text") for iid in rows] == [
+        "У аккаунта нет диалогов"
+    ]
+
+
+def test_refresh_chat_uses_repository_refresh_api(
+    window: MainWindow, fake_repository: FakeRepository
+) -> None:
+    """Refresh action asks repository for latest chat messages."""
+    window.dialogs_panel.select("d-1")
+    window.master.update()
+
+    window._on_refresh_chat_requested()  # pylint: disable=protected-access
+    window.master.update()
+
+    assert fake_repository.refresh_calls == ["d-1"]
+
+
+def test_preload_media_uses_repository_and_refreshes_transcript(
+    window: MainWindow, fake_repository: FakeRepository
+) -> None:
+    """Media preload runs repository preload then refreshes selected dialog view."""
+    fake_repository._messages["d-1"] = [
+        Message(
+            author="Контакт",
+            sent_at="2026-09-15T10:00:00",
+            text="Фото",
+            outgoing=False,
+            media_kind="photo",
+            media_path="",
+            media_caption="",
+            media_mime="image/jpeg",
+        )
+    ]
+    window.dialogs_panel.select("d-1")
+    window.master.update()
+
+    window._on_preload_media_requested()  # pylint: disable=protected-access
+    window.master.update()
+
+    assert fake_repository.preload_calls == [("a-1", "d-1", None)]
+    assert fake_repository.refresh_calls[-1] == "d-1"
     rows = window.dialogs_panel.tree.get_children()
     assert [window.dialogs_panel.tree.item(iid, "text") for iid in rows] == [
         "У аккаунта нет диалогов"

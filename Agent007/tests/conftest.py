@@ -54,6 +54,8 @@ class FakeRepository:
         self.dialog_calls: list[str] = []
         self.message_calls: list[str] = []
         self.clear_calls: list[str] = []
+        self.refresh_calls: list[str] = []
+        self.preload_calls: list[tuple[str, str, int | None]] = []
 
     def accounts(self) -> list[Account]:
         """Return the canned accounts."""
@@ -78,6 +80,38 @@ class FakeRepository:
             self._messages.pop(dialog.id, None)
         self._dialogs[account_id] = []
         return (cleared, 0)
+
+    def refresh_dialog_messages(self, dialog_id: str) -> list[Message]:
+        """Record refresh request and return latest canned messages."""
+        self.refresh_calls.append(dialog_id)
+        return list(self._messages.get(dialog_id, []))
+
+    def preload_dialog_media(
+        self, account_id: str, dialog_id: str, limit: int | None = None
+    ) -> tuple[int, int, int]:
+        """Record media preload request and mark existing media as already cached."""
+        self.preload_calls.append((account_id, dialog_id, limit))
+        messages = self._messages.get(dialog_id, [])
+        downloaded = 0
+        skipped = 0
+        for index, message in enumerate(messages):
+            if message.media_kind == "none":
+                continue
+            if message.media_path:
+                skipped += 1
+                continue
+            messages[index] = Message(
+                author=message.author,
+                sent_at=message.sent_at,
+                text=message.text,
+                outgoing=message.outgoing,
+                media_kind=message.media_kind,
+                media_path=f"Agent007/media/cache/{dialog_id}/{index}.bin",
+                media_caption=message.media_caption,
+                media_mime=message.media_mime,
+            )
+            downloaded += 1
+        return (downloaded, skipped, 0)
 
 
 @pytest.fixture(name="tk_root")
@@ -111,8 +145,26 @@ def fake_repository_fixture() -> FakeRepository:
     }
     messages = {
         "d-1": [
-            Message(author="Контакт", sent_at="2026-09-15T10:00:00", text="Привет", outgoing=False),
-            Message(author="Я", sent_at="2026-09-15T10:05:00", text="И тебе", outgoing=True),
+            Message(
+                author="Контакт",
+                sent_at="2026-09-15T10:00:00",
+                text="Привет",
+                outgoing=False,
+                media_kind="none",
+                media_path="",
+                media_caption="",
+                media_mime="",
+            ),
+            Message(
+                author="Я",
+                sent_at="2026-09-15T10:05:00",
+                text="И тебе",
+                outgoing=True,
+                media_kind="none",
+                media_path="",
+                media_caption="",
+                media_mime="",
+            ),
         ],
     }
     return FakeRepository(accounts, dialogs, messages)

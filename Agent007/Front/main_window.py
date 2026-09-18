@@ -142,6 +142,8 @@ class MainWindow:
         self._settings = get_settings()
         self._ui_thread_id = threading.get_ident()
         self._add_account_in_progress = False
+        self._selected_account: Account | None = None
+        self._selected_dialog: Dialog | None = None
         self._ui_calls: Queue[tuple[Callable[[], str | None], threading.Event, dict[str, str | None], dict[str, Exception | None]]] = Queue()
         self.master.after(25, self._drain_ui_calls)
 
@@ -164,6 +166,10 @@ class MainWindow:
             self.container, on_select=self._on_dialog_selected
         )
         self.messages_panel = MessagesPanel(self.container)
+        self.messages_panel.configure_actions(
+            on_refresh_chat=self._on_refresh_chat_requested,
+            on_preload_media=self._on_preload_media_requested,
+        )
 
         self._lay_out_columns()
         self._status_bar = ttk.Label(
@@ -201,12 +207,15 @@ class MainWindow:
     def _on_account_selected(self, account: Account) -> None:
         """Show the dialogs of the chosen account and reset the transcript."""
         _LOGGER.debug("Account selected: %s", account.id)
+        self._selected_account = account
+        self._selected_dialog = None
         self.dialogs_panel.set_dialogs(self._repository.dialogs(account.id))
         self.messages_panel.show_placeholder()
 
     def _on_dialog_selected(self, dialog: Dialog) -> None:
         """Show the transcript of the chosen dialog."""
         _LOGGER.debug("Dialog selected: %s", dialog.id)
+        self._selected_dialog = dialog
         self.messages_panel.show_dialog(dialog, self._repository.messages(dialog.id))
 
     def _on_add_account_requested(self, payload: AddAccountRequest) -> None:
@@ -312,6 +321,79 @@ class MainWindow:
         self.dialogs_panel.set_dialogs(self._repository.dialogs(account.id))
         self.messages_panel.show_placeholder()
         self._set_status(f"Чаты очищены: {cleared}, ошибок: {failed}")
+
+    def _on_refresh_chat_requested(self) -> None:
+        """Refresh currently selected chat and redraw transcript."""
+        dialog = self._selected_dialog
+        if dialog is None:
+            messagebox.showinfo("Обновить чат", "Сначала выберите чат")
+            return
+
+        self.messages_panel.set_loading(True)
+        self._set_status("Обновление чата...")
+
+        def _worker() -> None:
+            try:
+                messages = self._repository.refresh_dialog_messages(dialog.id)
+            except RuntimeError as error:
+                self._post_to_ui(lambda: self.messages_panel.set_loading(False))
+                self._post_to_ui(lambda: self._set_status(str(error)))
+                self._post_to_ui(lambda: messagebox.showinfo("Режим данных", str(error)))
+                return
+            except Exception:  # pragma: no cover - runtime dependency
+                _LOGGER.exception("Could not refresh chat %s", dialog.id)
+                self._post_to_ui(lambda: self.messages_panel.set_loading(False))
+                self._post_to_ui(lambda: self._set_status("Не удалось обновить чат"))
+                self._post_to_ui(lambda: messagebox.showerror("Обновить чат", "Не удалось обновить чат"))
+                return
+
+            self._post_to_ui(lambda: self.messages_panel.show_dialog(dialog, messages))
+            self._post_to_ui(lambda: self._set_status("Чат обновлён"))
+            self._post_to_ui(lambda: self.messages_panel.set_loading(False))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_preload_media_requested(self) -> None:
+        """Download media for selected chat and redraw transcript."""
+        dialog = self._selected_dialog
+        account = self._selected_account
+        if dialog is None or account is None:
+            messagebox.showinfo("Загрузить медиа", "Сначала выберите чат")
+            return
+
+        self.messages_panel.set_loading(True)
+        self._set_status("Загрузка медиа...")
+
+        def _worker() -> None:
+            try:
+                downloaded, skipped, failed = self._repository.preload_dialog_media(
+                    account.id,
+                    dialog.id,
+                )
+                messages = self._repository.refresh_dialog_messages(dialog.id)
+            except RuntimeError as error:
+                self._post_to_ui(lambda: self.messages_panel.set_loading(False))
+                self._post_to_ui(lambda: self._set_status(str(error)))
+                self._post_to_ui(lambda: messagebox.showinfo("Режим данных", str(error)))
+                return
+            except Exception:  # pragma: no cover - runtime dependency
+                _LOGGER.exception("Could not preload media for chat %s", dialog.id)
+                self._post_to_ui(lambda: self.messages_panel.set_loading(False))
+                self._post_to_ui(lambda: self._set_status("Не удалось загрузить медиа"))
+                self._post_to_ui(
+                    lambda: messagebox.showerror("Загрузить медиа", "Не удалось загрузить медиа")
+                )
+                return
+
+            self._post_to_ui(lambda: self.messages_panel.show_dialog(dialog, messages))
+            self._post_to_ui(
+                lambda: self._set_status(
+                    f"Медиа: загружено {downloaded}, пропущено {skipped}, ошибок {failed}"
+                )
+            )
+            self._post_to_ui(lambda: self.messages_panel.set_loading(False))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _request_code(self, phone: str) -> str | None:
         """Prompt for Telegram SMS/app code in a modal dialog."""
