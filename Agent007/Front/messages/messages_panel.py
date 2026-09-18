@@ -14,6 +14,12 @@ from tkinter import ttk
 from app.models import Dialog, Message
 from Front import theme
 
+try:
+    from PIL import Image, ImageTk
+except ImportError:  # pragma: no cover - depends on runtime environment
+    Image = None
+    ImageTk = None
+
 TITLE = "Сообщения"
 
 _PLACEHOLDER_TEXT = "Выберите диалог, чтобы прочитать переписку"
@@ -53,7 +59,7 @@ class MessagesPanel(ttk.Labelframe):
         super().__init__(master, text=TITLE, padding=theme.PANEL_PADDING)
         self._on_refresh_chat: Callable[[], None] | None = None
         self._on_preload_media: Callable[[], None] | None = None
-        self._image_refs: list[tk.PhotoImage] = []
+        self._image_refs: list[object] = []
         self._spinner_job: str | None = None
         self._spinner_index = 0
         self._loading = False
@@ -211,7 +217,13 @@ class MessagesPanel(ttk.Labelframe):
         try:
             return tk.PhotoImage(file=str(file_path))
         except tk.TclError:
-            return None
+            if Image is None or ImageTk is None:
+                return None
+            try:
+                with Image.open(file_path) as image:
+                    return ImageTk.PhotoImage(image.copy())
+            except Exception:
+                return None
 
     def _replace_message_body(self, messages: Sequence[Message]) -> None:
         self._image_refs = []
