@@ -34,6 +34,7 @@ _LOGGER = get_logger(__name__)
 WINDOW_TITLE = "Agent007 — управление Telegram-аккаунтами"
 MIN_WIDTH = 1024
 MIN_HEIGHT = 640
+STATUS_PREFIX = "Telegram: "
 
 # Accounts 20%, dialogs 30%, messages 50%.
 COLUMN_WEIGHTS = (20, 30, 50)
@@ -141,7 +142,6 @@ class MainWindow:
         self._settings = get_settings()
         self._ui_thread_id = threading.get_ident()
         self._add_account_in_progress = False
-        self._add_account_thread: threading.Thread | None = None
         self._ui_calls: Queue[tuple[Callable[[], str | None], threading.Event, dict[str, str | None], dict[str, Exception | None]]] = Queue()
         self.master.after(25, self._drain_ui_calls)
 
@@ -151,6 +151,7 @@ class MainWindow:
         self.container = ttk.Frame(master, padding=theme.PANEL_PADDING)
         self.container.pack(fill="both", expand=True)
         self.container.rowconfigure(0, weight=1)
+        self._status_var = tk.StringVar(value="Готово")
 
         self.accounts_panel = AccountsPanel(
             self.container,
@@ -164,6 +165,14 @@ class MainWindow:
         self.messages_panel = MessagesPanel(self.container)
 
         self._lay_out_columns()
+        self._status_bar = ttk.Label(
+            self.master,
+            textvariable=self._status_var,
+            anchor="w",
+            padding=(theme.PANEL_PADDING, 2),
+            foreground=theme.COLOR_MUTED,
+        )
+        self._status_bar.pack(fill="x", side="bottom")
         self.load_accounts()
 
     @property
@@ -202,12 +211,8 @@ class MainWindow:
     def _on_add_account_requested(self, payload: AddAccountRequest) -> None:
         """Authenticate and add account in live mode, then refresh the list."""
         if self._add_account_in_progress:
-            if self._add_account_thread is not None and not self._add_account_thread.is_alive():
-                self._add_account_in_progress = False
-                self._add_account_thread = None
-            else:
-                messagebox.showinfo("Подключение Telegram", "Подключение уже выполняется")
-                return
+            messagebox.showinfo("Подключение Telegram", "Подключение уже выполняется")
+            return
 
         phone = payload.phone.strip()
         if not phone:
@@ -215,6 +220,7 @@ class MainWindow:
             return
 
         self._add_account_in_progress = True
+        self._set_status("Подготовка подключения...")
 
         def _worker() -> None:
             try:
@@ -222,15 +228,19 @@ class MainWindow:
                     phone,
                     request_code=self._request_code,
                     request_password=self._request_password,
+                    status_callback=self._on_telegram_status,
                 )
             except RuntimeError as error:
+                self._post_to_ui(lambda: self._set_status(str(error)))
                 self._post_to_ui(lambda: messagebox.showinfo("Режим данных", str(error)))
             except ValueError as error:
+                self._post_to_ui(lambda: self._set_status(str(error)))
                 self._post_to_ui(
                     lambda: messagebox.showerror("Подключение Telegram", str(error))
                 )
             except Exception:  # pragma: no cover - runtime dependency
                 _LOGGER.exception("Could not add account")
+                self._post_to_ui(lambda: self._set_status("Не удалось подключить аккаунт"))
                 self._post_to_ui(
                     lambda: messagebox.showerror(
                         "Подключение Telegram", "Не удалось подключить аккаунт"
@@ -238,13 +248,14 @@ class MainWindow:
                 )
             else:
                 self._post_to_ui(lambda: self._on_account_added(account))
+                self._post_to_ui(lambda: self._set_status(f"Подключён: {account.phone}"))
             finally:
-                self._add_account_in_progress = False
-                self._add_account_thread = None
+                self._post_to_ui(self._set_add_account_idle)
 
-        thread = threading.Thread(target=_worker, daemon=True)
-        self._add_account_thread = thread
-        thread.start()
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _set_add_account_idle(self) -> None:
+        self._add_account_in_progress = False
 
     def _on_account_added(self, account: Account) -> None:
         self.load_accounts()
@@ -284,8 +295,21 @@ class MainWindow:
             lambda: self._ask_text("Пароль Telegram", f"Введите пароль для {phone}", masked=True)
         )
 
+    def _on_telegram_status(self, message: str) -> None:
+        def _show() -> None:
+            self._set_status(message)
+            _LOGGER.info("Telegram connect: %s", message)
+
+        self._post_to_ui(_show)
+
+    def _set_status(self, message: str) -> None:
+        self._status_var.set(f"{STATUS_PREFIX}{message}")
+
     def _post_to_ui(self, callback: Callable[[], None]) -> None:
-        self.master.after(0, callback)
+        try:
+            self.master.after(0, callback)
+        except tk.TclError:
+            _LOGGER.debug("UI is already closed; skip callback")
 
     def _call_on_ui_thread(self, callback: Callable[[], str | None]) -> str | None:
         if threading.get_ident() == self._ui_thread_id:

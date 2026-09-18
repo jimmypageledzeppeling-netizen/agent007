@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+import app.repository as repository_module
 from app.config import Settings
 from app.models import Account, AccountStatus, DialogKind
 from app.repository import (
@@ -258,3 +260,86 @@ def test_live_repository_removes_account_from_json_storage(tmp_path: Path) -> No
 
     assert repository.remove_account("tg-1") is True
     assert repository.accounts() == []
+
+
+def test_live_repository_add_account_uses_worker_and_reports_status(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """add_account delegates auth to worker, emits status and persists the account."""
+    settings = Settings(
+        _env_file=None,
+        data_mode="live",
+        data_dir=tmp_path / "data",
+        sessions_dir=tmp_path / "sessions",
+        telegram_api_id=1,
+        telegram_api_hash="hash",
+    )
+    repository = LiveRepository(settings=settings)
+
+    statuses: list[str] = []
+    events: list[str] = []
+    workers: list[FakeWorker] = []
+
+    class FakeWorker:
+        def __init__(
+            self,
+            *,
+            api_id: int,
+            api_hash: str,
+            session_path: Path,
+            phone: str,
+            request_code: Callable[[str], str | None],
+            request_password: Callable[[str], str | None],
+            status_callback: Callable[[str], None] | None = None,
+        ) -> None:
+            self._session_name = session_path.name
+            self._account = Account(
+                id="tg-42",
+                name="Tester · +7999",
+                phone="+7999",
+                status=AccountStatus.ONLINE,
+            )
+            self._status_callback = status_callback
+            self._alive = True
+            workers.append(self)
+
+        def start(self) -> None:
+            events.append(f"start:{self._session_name}")
+            if self._status_callback is not None:
+                self._status_callback("Подключение к Telegram...")
+
+        def wait_ready(self, timeout: float = 120.0) -> Account:
+            events.append(f"wait:{self._session_name}")
+            return self._account
+
+        def stop(self) -> None:
+            events.append(f"stop:{self._session_name}")
+            self._alive = False
+
+        def join(self, timeout: float | None = None) -> None:
+            events.append(f"join:{self._session_name}")
+            self._alive = False
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+    monkeypatch.setattr(repository_module, "TelegramWorker", FakeWorker)
+
+    def _rename_session(old_name: str, new_name: str) -> None:
+        events.append(f"rename:{old_name}->{new_name}")
+        assert workers
+        assert workers[0]._alive is False
+
+    monkeypatch.setattr(repository, "_rename_session", _rename_session)
+
+    account = repository.add_account(
+        "+7999",
+        request_code=lambda _phone: "11111",
+        request_password=lambda _phone: None,
+        status_callback=statuses.append,
+    )
+
+    assert account.id == "tg-42"
+    assert statuses == ["Подключение к Telegram..."]
+    assert events.index("join:phone-+7999") < events.index("rename:phone-+7999->tg-42")
+    assert repository.accounts()[0].id == "tg-42"

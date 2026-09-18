@@ -14,13 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor
+import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-from telethon import errors, utils
-from telethon.sync import TelegramClient
+from telethon import TelegramClient, errors, utils
 from telethon.tl.types import Channel, Chat, User
 
 from app.config import Settings, get_settings
@@ -57,6 +56,7 @@ class DataRepository(Protocol):
         phone: str,
         request_code: Callable[[str], str | None],
         request_password: Callable[[str], str | None],
+        status_callback: Callable[[str], None] | None = None,
     ) -> Account:
         """Add a Telegram account to the data source and return it."""
         raise NotImplementedError
@@ -109,6 +109,7 @@ class JsonFileRepository:
         phone: str,
         request_code: Callable[[str], str | None],
         request_password: Callable[[str], str | None],
+        status_callback: Callable[[str], None] | None = None,
     ) -> Account:
         """Reject account creation outside live mode."""
         raise RuntimeError("Добавление аккаунта доступно только в DATA_MODE=live")
@@ -185,6 +186,143 @@ class JsonFileRepository:
         return parsed
 
 
+class TelegramWorker(threading.Thread):
+    """Dedicated Telegram worker with its own asyncio event loop."""
+
+    def __init__(
+        self,
+        *,
+        api_id: int,
+        api_hash: str,
+        session_path: Path,
+        phone: str,
+        request_code: Callable[[str], str | None],
+        request_password: Callable[[str], str | None],
+        status_callback: Callable[[str], None] | None = None,
+    ) -> None:
+        super().__init__(daemon=True)
+        self._api_id = int(api_id)
+        self._api_hash = api_hash
+        self._session_path = session_path
+        self._phone = phone
+        self._request_code = request_code
+        self._request_password = request_password
+        self._status_callback = status_callback
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._client: TelegramClient | None = None
+        self._ready = threading.Event()
+        self._stop = threading.Event()
+        self._error: Exception | None = None
+        self._account: Account | None = None
+
+    @property
+    def account(self) -> Account | None:
+        return self._account
+
+    @property
+    def error(self) -> Exception | None:
+        return self._error
+
+    def run(self) -> None:
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._main())
+        except Exception as error:  # pragma: no cover - runtime dependency
+            self._error = error
+        finally:
+            if self._client is not None:
+                try:
+                    self._loop.run_until_complete(self._client.disconnect())
+                except Exception:  # pragma: no cover - runtime dependency
+                    _LOGGER.exception("Could not disconnect Telegram client")
+            self._ready.set()
+            asyncio.set_event_loop(None)
+            self._loop.close()
+
+    def stop(self) -> None:
+        self._stop.set()
+        if self._loop is not None and not self._loop.is_closed():
+            self._loop.call_soon_threadsafe(lambda: None)
+
+    def wait_ready(self, timeout: float = 120.0) -> Account:
+        if not self._ready.wait(timeout=timeout):
+            raise TimeoutError("Превышено время ожидания подключения Telegram")
+        if self._error is not None:
+            raise self._error
+        if self._account is None:
+            raise RuntimeError("Не удалось получить профиль Telegram")
+        return self._account
+
+    def run_rpc(self, operation: Callable[[TelegramClient], Any], timeout: float = 30.0) -> Any:
+        if self._loop is None or self._client is None:
+            raise RuntimeError("Клиент Telegram не подключён")
+
+        async def _invoke() -> Any:
+            if self._client is None:
+                raise RuntimeError("Клиент Telegram не подключён")
+            value = operation(self._client)
+            if asyncio.iscoroutine(value):
+                return await value
+            return value
+
+        future = asyncio.run_coroutine_threadsafe(_invoke(), self._loop)
+        return future.result(timeout=timeout)
+
+    async def _main(self) -> None:
+        self._status("Подключение к Telegram...")
+        self._client = TelegramClient(str(self._session_path), self._api_id, self._api_hash)
+        await self._client.connect()
+
+        if not await self._client.is_user_authorized():
+            self._status("Запрос кода подтверждения...")
+            sent = await self._client.send_code_request(self._phone)
+            self._status("Ожидание кода Telegram...")
+            code = (self._request_code(self._phone) or "").strip()
+            if not code:
+                raise ValueError("Код подтверждения не введён")
+
+            try:
+                self._status("Подтверждение кода...")
+                await self._client.sign_in(
+                    phone=self._phone,
+                    code=code,
+                    phone_code_hash=sent.phone_code_hash,
+                )
+            except errors.SessionPasswordNeededError:
+                self._status("Ожидание пароля 2FA...")
+                password = (self._request_password(self._phone) or "").strip()
+                if not password:
+                    raise ValueError("Пароль 2FA не введён")
+                self._status("Подтверждение пароля 2FA...")
+                await self._client.sign_in(password=password)
+
+        me = await self._client.get_me()
+        if me is None:
+            raise ValueError("Не удалось получить профиль Telegram")
+
+        account_id = f"tg-{me.id}"
+        display = utils.get_display_name(me).strip() or self._phone
+        self._account = Account(
+            id=account_id,
+            name=f"{display} · {self._phone}",
+            phone=self._phone,
+            status=AccountStatus.ONLINE,
+        )
+        self._status("Аккаунт Telegram подключён")
+        self._ready.set()
+
+        while not self._stop.is_set():
+            await asyncio.sleep(0.2)
+
+    def _status(self, message: str) -> None:
+        if self._status_callback is not None:
+            try:
+                self._status_callback(message)
+            except Exception:  # pragma: no cover - defensive
+                _LOGGER.exception("Status callback failed")
+
+
 class LiveRepository:
     """Telegram-backed repository with local JSON account storage and session files."""
 
@@ -193,6 +331,7 @@ class LiveRepository:
         self._data_dir = self._settings.data_path
         self._sessions_dir = self._settings.sessions_path
         self._accounts_path = self._data_dir / LIVE_ACCOUNTS_FILENAME
+        self._workers: dict[str, TelegramWorker] = {}
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._sessions_dir.mkdir(parents=True, exist_ok=True)
 
@@ -203,72 +342,16 @@ class LiveRepository:
 
     def dialogs(self, account_id: str) -> list[Dialog]:
         """Read dialogs from Telegram for one connected account."""
-        record = self._find_record(account_id)
-        if record is None:
+        worker = self._get_worker(account_id)
+        if worker is None:
             return []
 
-        try:
-            return self._in_worker(lambda: self._load_dialogs(account_id, record))
-        except (errors.RPCError, OSError):
-            _LOGGER.exception("Could not load dialogs for account %s", account_id)
-            return []
-
-    def messages(self, dialog_id: str) -> list[Message]:
-        """Read messages from Telegram for one dialog id produced by dialogs()."""
-        account_id, peer_id = self._split_dialog_id(dialog_id)
-        if account_id is None:
-            return []
-
-        record = self._find_record(account_id)
-        if record is None:
-            return []
-
-        try:
-            return self._in_worker(lambda: self._load_messages(record, peer_id))
-        except (errors.RPCError, OSError, ValueError):
-            _LOGGER.exception("Could not load messages for dialog %s", dialog_id)
-            return []
-
-    def add_account(
-        self,
-        phone: str,
-        request_code: Callable[[str], str | None],
-        request_password: Callable[[str], str | None],
-    ) -> Account:
-        """Authenticate in Telegram and persist account metadata."""
-        clean_phone = phone.strip()
-        if not clean_phone:
-            raise ValueError("Номер телефона не указан")
-
-        temp_record = {"id": f"phone-{clean_phone}", "phone": clean_phone}
-        sent_hash = self._in_worker(lambda: self._send_code_request(clean_phone, temp_record))
-        code = (request_code(clean_phone) or "").strip()
-        if not code:
-            raise ValueError("Код подтверждения не введён")
-
-        try:
-            account = self._in_worker(
-                lambda: self._sign_in_with_code(clean_phone, temp_record, code, sent_hash)
-            )
-        except errors.SessionPasswordNeededError:
-            password = (request_password(clean_phone) or "").strip()
-            if not password:
-                raise ValueError("Пароль 2FA не введён")
-            account = self._in_worker(
-                lambda: self._sign_in_with_password(clean_phone, temp_record, password)
-            )
-
-        self._rename_session(temp_record["id"], account.id)
-        self._upsert_account(account)
-        return account
-
-    def _load_dialogs(self, account_id: str, record: Mapping[str, Any]) -> list[Dialog]:
-        with self._client(record) as client:
-            if not client.is_user_authorized():
+        async def _load(client: TelegramClient) -> list[Dialog]:
+            if not await client.is_user_authorized():
                 return []
 
             dialogs: list[Dialog] = []
-            for item in client.iter_dialogs(limit=200):
+            async for item in client.iter_dialogs(limit=200):
                 kind = self._dialog_kind(item.entity)
                 dialogs.append(
                     Dialog(
@@ -281,14 +364,29 @@ class LiveRepository:
                 )
             return dialogs
 
-    def _load_messages(self, record: Mapping[str, Any], peer_id: int) -> list[Message]:
-        with self._client(record) as client:
-            if not client.is_user_authorized():
+        try:
+            return worker.run_rpc(_load)
+        except (errors.RPCError, OSError, RuntimeError, TimeoutError):
+            _LOGGER.exception("Could not load dialogs for account %s", account_id)
+            return []
+
+    def messages(self, dialog_id: str) -> list[Message]:
+        """Read messages from Telegram for one dialog id produced by dialogs()."""
+        account_id, peer_id = self._split_dialog_id(dialog_id)
+        if account_id is None:
+            return []
+
+        worker = self._get_worker(account_id)
+        if worker is None:
+            return []
+
+        async def _load(client: TelegramClient) -> list[Message]:
+            if not await client.is_user_authorized():
                 return []
 
-            items = list(reversed(client.get_messages(peer_id, limit=100)))
+            items = await client.get_messages(peer_id, limit=100)
             result: list[Message] = []
-            for item in items:
+            for item in reversed(items):
                 author = "Я" if item.out else self._author_name(item)
                 result.append(
                     Message(
@@ -300,67 +398,109 @@ class LiveRepository:
                 )
             return result
 
-    def _send_code_request(
-        self,
-        clean_phone: str,
-        temp_record: Mapping[str, Any],
-    ) -> str:
-        with self._client(temp_record) as client:
-            sent = client.send_code_request(clean_phone)
-            return sent.phone_code_hash
+        try:
+            return worker.run_rpc(_load)
+        except (errors.RPCError, OSError, ValueError, RuntimeError, TimeoutError):
+            _LOGGER.exception("Could not load messages for dialog %s", dialog_id)
+            return []
 
-    def _sign_in_with_code(
+    def add_account(
         self,
-        clean_phone: str,
-        temp_record: Mapping[str, Any],
-        code: str,
-        sent_hash: str,
+        phone: str,
+        request_code: Callable[[str], str | None],
+        request_password: Callable[[str], str | None],
+        status_callback: Callable[[str], None] | None = None,
     ) -> Account:
-        with self._client(temp_record) as client:
-            client.sign_in(phone=clean_phone, code=code, phone_code_hash=sent_hash)
-            return self._build_account(clean_phone, client)
+        """Authenticate in Telegram and persist account metadata."""
+        clean_phone = phone.strip()
+        if not clean_phone:
+            raise ValueError("Номер телефона не указан")
 
-    def _sign_in_with_password(
-        self,
-        clean_phone: str,
-        temp_record: Mapping[str, Any],
-        password: str,
-    ) -> Account:
-        with self._client(temp_record) as client:
-            client.sign_in(password=password)
-            return self._build_account(clean_phone, client)
+        if not self._settings.is_telegram_configured:
+            self._settings = get_settings()
+        if not self._settings.is_telegram_configured:
+            raise ValueError("TELEGRAM_API_ID / TELEGRAM_API_HASH не настроены")
 
-    @staticmethod
-    def _build_account(clean_phone: str, client: TelegramClient) -> Account:
-        me = client.get_me()
-        if me is None:
-            raise ValueError("Не удалось получить профиль Telegram")
-
-        account_id = f"tg-{me.id}"
-        display = utils.get_display_name(me).strip() or clean_phone
-        return Account(
-            id=account_id,
-            name=f"{display} · {clean_phone}",
+        temp_id = f"phone-{clean_phone}"
+        session_path = self._sessions_dir / temp_id
+        worker = TelegramWorker(
+            api_id=self._settings.telegram_api_id,
+            api_hash=self._settings.telegram_api_hash.get_secret_value(),
+            session_path=session_path,
             phone=clean_phone,
-            status=AccountStatus.ONLINE,
+            request_code=request_code,
+            request_password=request_password,
+            status_callback=status_callback,
         )
+        worker.start()
+        try:
+            account = worker.wait_ready()
+        finally:
+            worker.stop()
+            worker.join(timeout=5)
 
-    @staticmethod
-    def _in_worker(work: Callable[[], _T]) -> _T:
-        def _execute() -> _T:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            try:
-                return work()
-            finally:
-                asyncio.set_event_loop(None)
-                loop.close()
+        self._rename_session(temp_id, account.id)
 
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            return executor.submit(_execute).result()
+        final_worker = TelegramWorker(
+            api_id=self._settings.telegram_api_id,
+            api_hash=self._settings.telegram_api_hash.get_secret_value(),
+            session_path=self._sessions_dir / account.id,
+            phone=clean_phone,
+            request_code=request_code,
+            request_password=request_password,
+            status_callback=status_callback,
+        )
+        final_worker.start()
+        final_worker.wait_ready()
+        self._workers[account.id] = final_worker
+
+        self._upsert_account(account)
+        return account
+
+    def _get_worker(self, account_id: str) -> TelegramWorker | None:
+        worker = self._workers.get(account_id)
+        if worker is not None and worker.is_alive():
+            return worker
+
+        record = self._find_record(account_id)
+        if record is None:
+            return None
+
+        if not self._settings.is_telegram_configured:
+            self._settings = get_settings()
+        if not self._settings.is_telegram_configured:
+            return None
+
+        session_name = str(record.get("session", record.get("id", ""))).strip()
+        if not session_name:
+            return None
+
+        fallback_phone = str(record.get("phone", "")).strip()
+        worker = TelegramWorker(
+            api_id=self._settings.telegram_api_id,
+            api_hash=self._settings.telegram_api_hash.get_secret_value(),
+            session_path=self._sessions_dir / session_name,
+            phone=fallback_phone,
+            request_code=lambda _phone: "",
+            request_password=lambda _phone: "",
+            status_callback=None,
+        )
+        worker.start()
+        try:
+            worker.wait_ready()
+        except Exception:
+            _LOGGER.exception("Could not restore Telegram worker for %s", account_id)
+            return None
+        self._workers[account_id] = worker
+        return worker
 
     def remove_account(self, account_id: str) -> bool:
         """Remove account from JSON storage and delete local Telegram session files."""
+        worker = self._workers.pop(account_id, None)
+        if worker is not None:
+            worker.stop()
+            worker.join(timeout=5)
+
         document = self._document()
         accounts = document.get("accounts", [])
         if not isinstance(accounts, list):
@@ -394,22 +534,6 @@ class LiveRepository:
             if isinstance(record, Mapping) and str(record.get("id", "")) == account_id:
                 return record
         return None
-
-    def _client(self, record: Mapping[str, Any]) -> TelegramClient:
-        if not self._settings.is_telegram_configured:
-            self._settings = get_settings()
-        if not self._settings.is_telegram_configured:
-            raise ValueError("TELEGRAM_API_ID / TELEGRAM_API_HASH не настроены")
-
-        session_name = str(record.get("session", record.get("id", ""))).strip()
-        if not session_name:
-            raise ValueError("У аккаунта не указан session id")
-        session_path = self._sessions_dir / session_name
-        return TelegramClient(
-            str(session_path),
-            self._settings.telegram_api_id,
-            self._settings.telegram_api_hash.get_secret_value(),
-        )
 
     @staticmethod
     def _dialog_kind(entity: object) -> Any:
